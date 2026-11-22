@@ -744,11 +744,12 @@ export const bindPanel = inOrder(async (p: chrome.runtime.Port, windowId: number
 // on that tab only.
 export const openForTab = inOrder(async (tabId: number) => {
   if (!target().panelPerTab) return;
-  await ready;
-  await chatForTab(tabId);
+  // Opening needs the icon click's user gesture, spent if we dawdle first.
   const path = chrome.runtime.getManifest().side_panel?.default_path ?? "src/sidepanel/index.html";
   await chrome.sidePanel.setOptions({ tabId, path, enabled: true });
   await chrome.sidePanel.open({ tabId });
+  await ready;
+  await chatForTab(tabId);
 });
 
 // A tab becoming active swaps its window's panel to that tab's chat, or

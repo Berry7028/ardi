@@ -264,6 +264,9 @@ export class OpenCodeSession {
     const spec = buildServeSpec(opencodePath);
     const password = randomBytes(24).toString("base64url");
     const schedule = await this.scheduleEndpoint();
+    // The chat's OpenCode session id, made here so the MCP env can carry it
+    // before the session exists: serve accepts a client-chosen `ses_*` id.
+    const chatId = ocSessionId ?? `ses_${randomBytes(9).toString("hex")}`;
 
     const instructions = join((await mkdtemp(join(tmpdir(), "ardi-oc-"))), "instructions.md");
     await writeFile(instructions, [await readFile(SYSTEM_PROMPT, "utf8"), environmentSection(), `Today is ${today()}.`, ...(this.target.guide ?? [])].join("\n\n"));
@@ -285,6 +288,7 @@ export class OpenCodeSession {
               ARDI_BROWSER_TOKEN: process.env.ARDI_BROWSER_TOKEN ?? "",
               ARDI_SCHEDULE_URL: schedule.url,
               ARDI_SCHEDULE_TOKEN: schedule.token,
+              ARDI_CHAT_ID: chatId,
             },
           },
         },
@@ -310,7 +314,7 @@ export class OpenCodeSession {
     });
     const client = new OcClient(`http://${await listenPort(proc)}`, password);
 
-    const sessionId = await this.findSession(client, ocSessionId);
+    const sessionId = await this.findSession(client, chatId);
 
     const sse = new AbortController();
     this.phase = { state: "running", proc, client, sessionId, sse };
@@ -335,7 +339,7 @@ export class OpenCodeSession {
       const existing = await client.get<{ data: OcSessionInfo }>(`/api/session/${ocSessionId}`).catch(() => undefined);
       if (existing) return existing.data.id;
     }
-    const created = await client.post<{ data: OcSessionInfo }>("/api/session", { location: { directory: WORK_DIR } });
+    const created = await client.post<{ data: OcSessionInfo }>("/api/session", { id: ocSessionId, location: { directory: WORK_DIR } });
     return created.data.id;
   }
 

@@ -126,8 +126,9 @@ const handle = async (req: any, res: any) => {
     return json(res, 200, { location: { directory: "/" }, data: { id: "m1", providerID: "fake", name: "Fake M1" } });
   }
   if (req.method === "POST" && url.pathname === "/api/session") {
-    const id = `ses_${nextSession++}`;
-    sessions.set(id, { id, messages: [] });
+    const request = send();
+    const id = (typeof request?.id === "string" && request.id) || `ses_${nextSession++}`;
+    sessions.set(id, { id, messages: sessions.get(id)?.messages ?? [] });
     save();
     return json(res, 200, { data: { id } });
   }

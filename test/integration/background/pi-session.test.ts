@@ -60,7 +60,7 @@ const HISTORY: ChatMessage[] = [{ role: "user", id: "u1", content: "earlier", ti
 
 // A stored chat on `file`, with pi up on it and done with its first message.
 async function storedChat(file = SESSION_FILE) {
-  await pi.prompt("earlier");
+  await pi.prompt(panel.port, "earlier");
   const sent = bridge().sent.findLast((r: { type: string }) => r.type === "prompt") as { promptId: string };
   fromBridge({ type: "prompt_result", promptId: sent.promptId, started: true });
   ready(file, HISTORY);
@@ -79,7 +79,7 @@ describe("background pi session", () => {
 
   test("the first message starts pi and turns the draft into a stored chat named after it, tab mentions as @title", async () => {
     const text = "Plan a trip like [@Kyoto in 3 days](https://example.com/kyoto), with temples, food markets and a day in Nara";
-    await pi.prompt(text);
+    await pi.prompt(panel.port, text);
     expect(bridge().sent).toEqual([
       { type: "start", sessionFile: undefined, piPath: undefined },
       { type: "prompt", text, promptId: expect.any(String) },
@@ -93,7 +93,7 @@ describe("background pi session", () => {
 
   test("images sent with a message go to pi, and show in the chat once pi starts it", async () => {
     const images = [{ data: "aGk=", mimeType: "image/png" }];
-    await pi.prompt("what's this?", images);
+    await pi.prompt(panel.port, "what's this?", images);
     expect(bridge().sent.at(-1)).toEqual({ type: "prompt", text: "what's this?", images, promptId: expect.any(String) });
     ready(SESSION_FILE);
     chunk({ type: "user", text: "what's this?", images, at: 1 });
@@ -102,7 +102,7 @@ describe("background pi session", () => {
 
   test("an image bigger than one Chrome message still reaches pi and a reopened panel", async () => {
     const data = "A".repeat(CHROME_MAX_MESSAGE_BYTES + 1024);
-    await pi.prompt("look", [{ data, mimeType: "image/png" }]);
+    await pi.prompt(panel.port, "look", [{ data, mimeType: "image/png" }]);
     const toBridge: unknown[] = [];
     bridge().sent.forEach(joinParts((request) => toBridge.push(request)));
     expect(toBridge.at(-1)).toMatchObject({ type: "prompt", text: "look", images: [{ mimeType: "image/png" }] });
@@ -119,12 +119,12 @@ describe("background pi session", () => {
   });
 
   test("starting twice at once opens one bridge", async () => {
-    await Promise.all([pi.start(), pi.start()]);
+    await Promise.all([pi.start(panel.port), pi.start(panel.port)]);
     expect(chromeFake.nativePorts).toHaveLength(1);
   });
 
   test("ready saves pi's session file on the chat and replays history", async () => {
-    await pi.prompt("earlier");
+    await pi.prompt(panel.port, "earlier");
     fromBridge({ type: "ready", sessionFile: SESSION_FILE, history: HISTORY, model: { models: [] }, commands: [{ name: "skill:demo" }] });
     await waitFor(async () => expect((await store.listSessions())[0].piSessionFile).toBe(SESSION_FILE));
     expect(last("replay")).toMatchObject({ status: "connected", history: HISTORY, commands: [{ name: "skill:demo" }], live: [] });
@@ -139,7 +139,7 @@ describe("background pi session", () => {
       return add.apply(this, args);
     };
     try {
-      await pi.prompt("hello");
+      await pi.prompt(panel.port, "hello");
     } finally {
       IDBObjectStore.prototype.add = add;
     }
@@ -167,7 +167,7 @@ describe("background pi session", () => {
   });
 
   test("a fatal bridge error shows as an error notice", async () => {
-    await pi.start();
+    await pi.start(panel.port);
     fromBridge({ type: "fatal", message: "pi exited (code 1)" });
     expect(last("live")?.chunk).toEqual({ type: "notice", content: "pi exited (code 1)", level: "error" });
   });
@@ -176,7 +176,7 @@ describe("background pi session", () => {
     await storedChat();
     chromeFake.storage.set("settings", { piPath: "/opt/pi" });
     const old = bridge();
-    await pi.restart();
+    await pi.restart(panel.port);
     expect(old.disconnected).toBe(true);
     expect(bridge()).not.toBe(old);
     expect(bridge().sent).toEqual([{ type: "start", sessionFile: SESSION_FILE, piPath: "/opt/pi" }]);
@@ -186,7 +186,7 @@ describe("background pi session", () => {
   test("a new chat starts its own pi and stays a draft until its first message", async () => {
     await storedChat();
     const old = bridge();
-    await pi.newSession();
+    await pi.newSession(panel.port);
     expect(bridge()).not.toBe(old);
     expect(bridge().sent).toEqual([{ type: "start", sessionFile: undefined, piPath: undefined }]);
     expect(last("replay")).toMatchObject({ session: { id: 0 }, history: [], live: [] });
@@ -197,7 +197,7 @@ describe("background pi session", () => {
   });
 
   test("a new chat asked for while the first message is still being stored opens after it", async () => {
-    await Promise.all([pi.prompt("first"), pi.newSession()]);
+    await Promise.all([pi.prompt(panel.port, "first"), pi.newSession(panel.port)]);
     expect((await store.listSessions()).map((chat) => chat.title)).toEqual(["first"]);
     expect(chromeFake.nativePorts[0].sent.map((request: { type: string }) => request.type)).toEqual(["start", "prompt"]);
     expect(last("replay")).toMatchObject({ session: { id: 0 }, live: [] });
@@ -206,7 +206,7 @@ describe("background pi session", () => {
   test("a message sent just before a chat switch stays in the chat it was sent from", async () => {
     await storedChat();
     const old = bridge();
-    await Promise.all([pi.prompt("again"), pi.newSession()]);
+    await Promise.all([pi.prompt(panel.port, "again"), pi.newSession(panel.port)]);
     expect(old.sent.at(-1)).toMatchObject({ type: "prompt", text: "again" });
     expect(bridge().sent).not.toContainEqual(expect.objectContaining({ type: "prompt" }));
     expect(last("replay")).toMatchObject({ session: { id: 0 }, live: [] });
@@ -214,17 +214,17 @@ describe("background pi session", () => {
 
   test("stop isn't held up behind a message still being stored", async () => {
     await storedChat();
-    const sending = pi.prompt("again");
-    pi.abort();
+    const sending = pi.prompt(panel.port, "again");
+    pi.abort(panel.port);
     expect(bridge().sent.at(-1)).toEqual({ type: "abort" });
     await sending;
   });
 
   test("switching back to a stored chat starts pi on its session file", async () => {
     const chat = await storedChat();
-    await pi.newSession();
+    await pi.newSession(panel.port);
     ready("/sessions/new.jsonl");
-    await pi.switchSession(chat.id);
+    await pi.switchSession(panel.port, chat.id);
     expect(bridge().sent).toEqual([{ type: "start", sessionFile: SESSION_FILE, piPath: undefined }]);
     expect(last("replay")?.session.id).toBe(chat.id);
   });
@@ -234,7 +234,7 @@ describe("background pi session", () => {
     await restartWorker();
     expect(last("replay")?.session.id).toBe(chat.id);
 
-    await pi.newSession();
+    await pi.newSession(panel.port);
     await restartWorker();
     expect(last("replay")?.session).toMatchObject({ id: 0, title: "" });
     expect(updates()[1]).toMatchObject({ kind: "sessions", currentId: 0 });
@@ -245,7 +245,7 @@ describe("background pi session", () => {
     await restartWorker();
     // Not loaded yet, rather than empty.
     expect(last("replay")).toMatchObject({ session: { id: chat.id }, history: null });
-    await pi.start();
+    await pi.start(panel.port);
     fromBridge({ type: "history", sessionFile: SESSION_FILE, history: HISTORY });
     expect(last("replay")).toMatchObject({ status: "connecting", history: HISTORY });
   });
@@ -254,7 +254,7 @@ describe("background pi session", () => {
     const chat = await storedChat();
     chunk({ type: "run_start", at: 1 });
     const old = bridge();
-    await pi.deleteSession(chat.id);
+    await pi.deleteSession(panel.port, chat.id);
     expect(await store.listSessions()).toEqual([]);
     expect(old.disconnected).toBe(true);
     expect(bridge().sent).toEqual([{ type: "start", sessionFile: undefined, piPath: undefined }]);
@@ -263,20 +263,20 @@ describe("background pi session", () => {
   });
 
   test("when the bridge goes away, the panel sees pi as not running", async () => {
-    await pi.start();
+    await pi.start(panel.port);
     bridge().close("Native host has exited.");
     expect(last("status")).toEqual({ kind: "status", status: "disconnected" });
   });
 
   test("a message pi never got goes back to the box when pi fails to start", async () => {
-    await pi.prompt("plan my trip");
+    await pi.prompt(panel.port, "plan my trip");
     fromBridge({ type: "fatal", message: "pi not found" });
     expect(last("restore")).toEqual({ kind: "restore", text: "plan my trip" });
   });
 
   test("a message handed back while the panel is closed waits for it, images included", async () => {
     const images = [{ data: "aGk=", mimeType: "image/png" }];
-    await pi.prompt("", images);
+    await pi.prompt(panel.port, "", images);
     panel.close();
     fromBridge({ type: "fatal", message: "pi not found" });
     // Chrome may stop the worker before a panel opens again.
@@ -287,7 +287,7 @@ describe("background pi session", () => {
   });
 
   test("a message sent while the bridge goes away goes to the next bridge", async () => {
-    await pi.start();
+    await pi.start(panel.port);
     const old = bridge();
     // oxlint-disable-next-line typescript/unbound-method -- called below with the store as `this`
     const { add } = IDBObjectStore.prototype;
@@ -296,7 +296,7 @@ describe("background pi session", () => {
       return add.apply(this, args);
     };
     try {
-      await pi.prompt("still here");
+      await pi.prompt(panel.port, "still here");
     } finally {
       IDBObjectStore.prototype.add = add;
     }
@@ -305,7 +305,7 @@ describe("background pi session", () => {
   });
 
   test("held text survives a panel that closes before it's handed over", async () => {
-    await pi.prompt("keep me");
+    await pi.prompt(panel.port, "keep me");
     panel.close();
     fromBridge({ type: "fatal", message: "pi not found" });
     const { id } = (await store.listSessions())[0];
@@ -329,9 +329,9 @@ describe("background pi session", () => {
     let disposed!: () => void;
     setTarget({ nativeHost: "com.ardi.test", connectBrowser: () => ({ receive() {}, preparePrompt: () => () => {}, cancel() {}, dispose: () => new Promise<void>((resolve) => (disposed = resolve)) }) });
     await storedChat();
-    const sending = pi.prompt("again");
+    const sending = pi.prompt(panel.port, "again");
     // The old connection is still being torn down when the message is stored.
-    const restarting = pi.restart();
+    const restarting = pi.restart(panel.port);
     await sending;
     disposed();
     await restarting;
@@ -341,7 +341,7 @@ describe("background pi session", () => {
 
   test("a message pi answered isn't handed back when the bridge goes away", async () => {
     await storedChat();
-    await pi.prompt("next");
+    await pi.prompt(panel.port, "next");
     for (const request of bridge().sent) {
       if (request.type === "prompt") fromBridge({ type: "prompt_result", promptId: request.promptId, started: true });
     }
@@ -359,8 +359,8 @@ describe("background pi session", () => {
 
     test("Cmd+Enter asks pi to steer with the message", async () => {
       await working();
-      await pi.prompt("later");
-      await pi.prompt("now", undefined, true);
+      await pi.prompt(panel.port, "later");
+      await pi.prompt(panel.port, "now", undefined, true);
       expect(bridge().sent.slice(-2)).toEqual([
         { type: "prompt", text: "later", promptId: expect.any(String) },
         { type: "prompt", text: "now", promptId: expect.any(String), steer: true },
@@ -372,7 +372,7 @@ describe("background pi session", () => {
       fromBridge({ type: "queue", queue: [{ text: "later", steer: false }] });
       expect(last("queue")).toEqual({ kind: "queue", queue: [{ text: "later", steer: false }] });
       expect(last("replay", await attach())?.queue).toEqual([{ text: "later", steer: false }]);
-      pi.queueAction({ action: "steer", index: 0, text: "later" });
+      pi.queueAction(panel.port, { action: "steer", index: 0, text: "later" });
       expect(bridge().sent.at(-1)).toEqual({ type: "queue_action", action: "steer", index: 0, text: "later" });
     });
 
@@ -387,9 +387,9 @@ describe("background pi session", () => {
     test("switching chats shows the next chat's queue, and the left chat's queue when back", async () => {
       const chat = await working();
       fromBridge({ type: "queue", queue: [{ text: "later", steer: false }] });
-      await pi.newSession();
+      await pi.newSession(panel.port);
       expect(last("replay")?.queue).toEqual([]);
-      await pi.switchSession(chat.id);
+      await pi.switchSession(panel.port, chat.id);
       expect(last("replay")?.queue).toEqual([{ text: "later", steer: false }]);
     });
   });
@@ -401,7 +401,7 @@ describe("background pi session", () => {
       busy(true);
       chunk({ type: "run_start", at: 1 });
       const port = bridge();
-      await pi.newSession();
+      await pi.newSession(panel.port);
       return { chat, port };
     }
 
@@ -421,7 +421,7 @@ describe("background pi session", () => {
       expect(updates().slice(seen)).not.toContainEqual(expect.objectContaining({ kind: "live" }));
 
       const ports = chromeFake.nativePorts.length;
-      await pi.switchSession(chat.id);
+      await pi.switchSession(panel.port, chat.id);
       // Back to the pi that kept working, not a new one.
       expect(chromeFake.nativePorts).toHaveLength(ports);
       expect(last("replay")).toMatchObject({ status: "connected", history: HISTORY });
@@ -432,10 +432,10 @@ describe("background pi session", () => {
 
     test("two chats take messages at the same time, each on its own pi", async () => {
       const { port } = await leftRunning();
-      await pi.prompt("a second trip");
+      await pi.prompt(panel.port, "a second trip");
       expect(bridge().sent.at(-1)).toMatchObject({ type: "prompt", text: "a second trip" });
       expect(port.sent).not.toContainEqual(expect.objectContaining({ text: "a second trip" }));
-      pi.abort();
+      pi.abort(panel.port);
       expect(bridge().sent.at(-1)).toEqual({ type: "abort" });
       expect(port.sent).not.toContainEqual({ type: "abort" });
     });
@@ -459,8 +459,8 @@ describe("background pi session", () => {
     test("a chat left with a message pi hasn't answered keeps its pi until the bridge is done", async () => {
       await storedChat();
       const port = bridge();
-      await pi.prompt("one more day");
-      await pi.newSession();
+      await pi.prompt(panel.port, "one more day");
+      await pi.newSession(panel.port);
       expect(port.disconnected).toBe(false);
       busy(true, port);
       const sent = port.sent.findLast((r: { type: string }) => r.type === "prompt") as { promptId: string };
@@ -475,15 +475,15 @@ describe("background pi session", () => {
       const port = bridge();
       busy(true);
       const chat = (await store.listSessions())[0];
-      await pi.prompt("later");
-      await pi.newSession();
+      await pi.prompt(panel.port, "later");
+      await pi.newSession(panel.port);
       const sent = port.sent.findLast((r: { type: string }) => r.type === "prompt") as { promptId: string };
       // The bridge answers a stopped message before handing it back.
       fromBridge({ type: "prompt_result", promptId: sent.promptId, started: false }, port);
       fromBridge({ type: "restore", text: "later" }, port);
       busy(false, port);
       expect(port.disconnected).toBe(true);
-      await pi.switchSession(chat.id);
+      await pi.switchSession(panel.port, chat.id);
       expect(last("restore")).toEqual({ kind: "restore", text: "later" });
     });
 
@@ -491,7 +491,7 @@ describe("background pi session", () => {
       await storedChat();
       await restartWorker();
       // The panel's start and a click on New chat, at once.
-      await Promise.all([pi.start(), pi.newSession()]);
+      await Promise.all([pi.start(panel.port), pi.newSession(panel.port)]);
       expect(chromeFake.nativePorts.slice(1).filter((port) => !port.disconnected)).toHaveLength(1);
     });
 
@@ -500,7 +500,7 @@ describe("background pi session", () => {
       busy(true);
       chunk({ type: "run_start", at: 1 });
       await waitFor(() => expect(last("sessions")?.running).toEqual([chat.id]));
-      await pi.restart();
+      await pi.restart(panel.port);
       await waitFor(() => expect(last("sessions")?.running).toEqual([]));
     });
 
@@ -509,16 +509,16 @@ describe("background pi session", () => {
       busy(true);
       chunk({ type: "run_start", at: 1 });
       const ports = chromeFake.nativePorts.length;
-      await Promise.all([pi.restart(), pi.newSession()]);
+      await Promise.all([pi.restart(panel.port), pi.newSession(panel.port)]);
       expect(chromeFake.nativePorts.slice(ports).filter((port) => !port.disconnected)).toHaveLength(1);
     });
 
     test("a chat left right after asking its pi for something keeps its pi until the bridge is done with it", async () => {
       await storedChat();
       const port = bridge();
-      await pi.compact();
+      await pi.compact(panel.port);
       // The bridge hasn't reported the compaction yet.
-      await pi.newSession();
+      await pi.newSession(panel.port);
       expect(port.disconnected).toBe(false);
       busy(true, port);
       busy(false, port);
@@ -529,8 +529,8 @@ describe("background pi session", () => {
       await storedChat();
       const port = bridge();
       const before = received(port);
-      await pi.compact();
-      await pi.newSession();
+      await pi.compact(panel.port);
+      await pi.newSession(panel.port);
       // Sent as the last run settled, read only now.
       busy(false, port, before);
       expect(port.disconnected).toBe(false);
@@ -545,7 +545,7 @@ describe("background pi session", () => {
       busy(false, port);
       expect(port.disconnected).toBe(true);
       await restartWorker();
-      await pi.switchSession(chat.id);
+      await pi.switchSession(panel.port, chat.id);
       await waitFor(() => expect(last("restore")).toEqual({ kind: "restore", text: "draft a reply" }));
     });
 
@@ -556,11 +556,11 @@ describe("background pi session", () => {
       const write = chrome.storage.local.set.bind(chrome.storage.local);
       // The user opens a new chat while the held text is being cleared.
       const moving = spyOn(chrome.storage.local, "set").mockImplementation(async (items: Record<string, unknown>) => {
-        if (JSON.stringify(items) === '{"held":{}}') await pi.newSession();
+        if (JSON.stringify(items) === '{"held":{}}') await pi.newSession(panel.port);
         return write(items);
       });
       try {
-        await pi.switchSession(chat.id);
+        await pi.switchSession(panel.port, chat.id);
         await waitFor(() => expect(last("replay")?.session.id).toBe(0));
         await new Promise((resolve) => setTimeout(resolve, 10));
       } finally {
@@ -574,7 +574,7 @@ describe("background pi session", () => {
 
     test("pi's late answer to a message doesn't bring back the spinner of a run that already ended", async () => {
       const chat = await storedChat();
-      await pi.prompt("quick one");
+      await pi.prompt(panel.port, "quick one");
       const sent = bridge().sent.findLast((r: { type: string }) => r.type === "prompt") as { promptId: string };
       chunk({ type: "run_start", at: 1 });
       chunk({ type: "run_end", at: 2 });
@@ -586,13 +586,13 @@ describe("background pi session", () => {
     test("leaving an idle chat stops its pi", async () => {
       await storedChat();
       const port = bridge();
-      await pi.newSession();
+      await pi.newSession(panel.port);
       expect(port.disconnected).toBe(true);
     });
 
     test("deleting a chat working in the background stops its pi", async () => {
       const { chat, port } = await leftRunning();
-      await pi.deleteSession(chat.id);
+      await pi.deleteSession(panel.port, chat.id);
       expect(port.disconnected).toBe(true);
       expect(last("sessions")?.running).toEqual([]);
     });
@@ -601,7 +601,7 @@ describe("background pi session", () => {
       const { chat, port } = await leftRunning();
       fromBridge({ type: "restore", text: "draft a reply" }, port);
       expect(last("restore")).toBeUndefined();
-      await pi.switchSession(chat.id);
+      await pi.switchSession(panel.port, chat.id);
       expect(last("restore")).toEqual({ kind: "restore", text: "draft a reply" });
     });
   });

@@ -82,6 +82,10 @@ export class PiClient {
     });
     this.port = port;
     this.onConnected(port);
+    // Tab-scoped panels bind to their window's active tab; the background
+    // answers with that tab's chat. Shared-panel targets ignore this. It
+    // queues first so the tab is bound before any request after it lands.
+    if (chrome.windows) this.send(chrome.windows.getCurrent().then((w) => ({ kind: "attach", windowId: w?.id ?? -1 })));
   }
 
   // A promise is a request still being prepared; null sends nothing. Stop

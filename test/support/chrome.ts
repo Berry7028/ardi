@@ -82,6 +82,20 @@ const fake = {
   // What chrome.tabs.query returns.
   tabs: [] as Partial<chrome.tabs.Tab>[],
   focusedWindow: 1,
+  // chrome.runtime.onConnect/onInstalled/onStartup; emit as Chrome would.
+  runtimeConnect: new Event(),
+  runtimeInstalled: new Event(),
+  runtimeStartup: new Event(),
+  runtimeMessage: new Event(),
+  // chrome.action.onClicked; emit the tab as Chrome would.
+  actionClicked: new Event(),
+  // chrome.tabs.onActivated/onRemoved; emit as Chrome would.
+  tabActivated: new Event(),
+  tabRemoved: new Event(),
+  // chrome.sidePanel options by tab id (GLOBAL = default options), and opens.
+  sidePanelOptions: new Map<number | undefined, { path?: string; enabled?: boolean }>(),
+  sidePanelOpened: [] as { tabId?: number; windowId?: number }[],
+  sidePanelBehavior: undefined as { openPanelOnActionClick?: boolean } | undefined,
   createdTabs: [] as chrome.tabs.CreateProperties[],
   debuggerAttached: [] as number[],
   // Tabs this extension's debugger is on now; Chrome refuses a second attach.
@@ -111,6 +125,16 @@ export function resetChrome() {
   fake.lastError = undefined;
   fake.tabs = [];
   fake.focusedWindow = 1;
+  fake.runtimeConnect.clear();
+  fake.runtimeInstalled.clear();
+  fake.runtimeStartup.clear();
+  fake.runtimeMessage.clear();
+  fake.actionClicked.clear();
+  fake.tabActivated.clear();
+  fake.tabRemoved.clear();
+  fake.sidePanelOptions.clear();
+  fake.sidePanelOpened = [];
+  fake.sidePanelBehavior = undefined;
   fake.createdTabs = [];
   fake.debuggerAttached = [];
   fake.debuggerOn.clear();
@@ -188,8 +212,14 @@ function storageArea(map: Map<string, unknown>) {
     connect({ name = "" }: { name?: string } = {}) {
       const port = new FakePort(name);
       fake.ports.push(port);
+      fake.runtimeConnect.emit(port);
       return port;
     },
+    onConnect: fake.runtimeConnect,
+    onInstalled: fake.runtimeInstalled,
+    onStartup: fake.runtimeStartup,
+    onMessage: fake.runtimeMessage,
+    getManifest: () => ({ side_panel: { default_path: "src/sidepanel/index.html" } }),
     connectNative(name: string) {
       const port = new FakePort(name);
       fake.nativePorts.push(port);
@@ -223,9 +253,33 @@ function storageArea(map: Map<string, unknown>) {
       return fake.onDebuggerCommand?.(method, params) ?? {};
     },
   },
+  action: {
+    onClicked: fake.actionClicked,
+  },
+  sidePanel: {
+    async setOptions(options: { tabId?: number; path?: string; enabled?: boolean }) {
+      fake.sidePanelOptions.set(options.tabId, { path: options.path, enabled: options.enabled });
+    },
+    async getOptions(filter?: { tabId?: number }) {
+      return fake.sidePanelOptions.get(filter?.tabId) ?? {};
+    },
+    async open(options: { tabId?: number; windowId?: number }) {
+      fake.sidePanelOpened.push(options);
+    },
+    async setPanelBehavior(behavior: { openPanelOnActionClick?: boolean }) {
+      fake.sidePanelBehavior = behavior;
+    },
+  },
+  windows: {
+    async getCurrent() {
+      return { id: fake.focusedWindow };
+    },
+  },
   tabs: {
+    onActivated: fake.tabActivated,
+    onRemoved: fake.tabRemoved,
     async query(query: chrome.tabs.QueryInfo = {}) {
-      return structuredClone(fake.tabs.filter(t => (!query.active || t.active) && (!query.lastFocusedWindow || t.windowId === fake.focusedWindow)));
+      return structuredClone(fake.tabs.filter(t => (!query.active || t.active) && (query.windowId === undefined || t.windowId === query.windowId) && (!query.lastFocusedWindow || t.windowId === fake.focusedWindow)));
     },
     async get(id: number) {
       const tab = fake.tabs.find(t => t.id === id);

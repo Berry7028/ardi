@@ -11,11 +11,25 @@ import { setTarget, type BackgroundTarget } from "./target";
 export function startBackground(target: BackgroundTarget): void {
   setTarget(target);
 
-  // Clicking the toolbar icon opens the side panel.
-  chrome.runtime.onInstalled.addListener(() => {
-    void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-    void schedules.rearm();
-  });
+  if (target.panelPerTab) {
+    // The toolbar icon opens that tab's own chat's panel, on that tab only.
+    // `onClicked` fires only while the panel doesn't open on action clicks;
+    // an install that set it keeps it, so it's switched off again here.
+    chrome.runtime.onInstalled.addListener(() => {
+      void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+    });
+    chrome.action.onClicked.addListener((tab) => {
+      if (tab.id !== undefined) void pi.openForTab(tab.id);
+    });
+    chrome.tabs.onActivated.addListener(({ windowId, tabId }) => void pi.tabActivated(windowId, tabId));
+    chrome.tabs.onRemoved.addListener((tabId) => void pi.tabClosed(tabId));
+  } else {
+    // Clicking the toolbar icon opens the side panel.
+    chrome.runtime.onInstalled.addListener(() => {
+      void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    });
+  }
+  chrome.runtime.onInstalled.addListener(() => void schedules.rearm());
 
   // Scheduled jobs. Listeners go in before the first await, so an alarm that
   // woke the worker reaches them.
@@ -28,8 +42,8 @@ export function startBackground(target: BackgroundTarget): void {
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== PANEL_PORT) return;
     void pi.attachPanel(port);
-    void pi.start();
-    port.onMessage.addListener(joinParts<PanelRequest>((req) => void handle(req)));
+    void pi.start(port);
+    port.onMessage.addListener(joinParts<PanelRequest>((req) => void handle(port, req)));
   });
 
   // The panel's one-off questions. Answered asynchronously (return true).
@@ -40,28 +54,30 @@ export function startBackground(target: BackgroundTarget): void {
 }
 
 // The panel's requests, over its port.
-function handle(req: PanelRequest) {
+function handle(port: chrome.runtime.Port, req: PanelRequest) {
   switch (req.kind) {
+    case "attach":
+      return pi.bindPanel(port, req.windowId);
     case "prompt":
-      return pi.prompt(req.text, req.images, req.steer);
+      return pi.prompt(port, req.text, req.images, req.steer);
     case "queue_action":
-      return pi.queueAction(req);
+      return pi.queueAction(port, req);
     case "abort":
-      return pi.abort();
+      return pi.abort(port);
     case "restart":
-      return pi.restart();
+      return pi.restart(port);
     case "new_session":
-      return pi.newSession();
+      return pi.newSession(port);
     case "switch_session":
-      return pi.switchSession(req.id);
+      return pi.switchSession(port, req.id);
     case "delete_session":
-      return pi.deleteSession(req.id);
+      return pi.deleteSession(port, req.id);
     case "compact":
-      return pi.compact();
+      return pi.compact(port);
     case "set_model":
-      return pi.setModel(req.provider, req.modelId);
+      return pi.setModel(port, req.provider, req.modelId);
     case "set_thinking_level":
-      return pi.setThinkingLevel(req.level);
+      return pi.setThinkingLevel(port, req.level);
   }
 }
 
@@ -73,7 +89,7 @@ async function answer(req: PanelQuestion) {
     }
     case "set_pi_path": {
       const result = await settings.setPiPath(req.piPath);
-      if (result.saved && !result.check.error) await pi.restart();
+      if (result.saved && !result.check.error) await pi.restartAll();
       return result satisfies PanelAnswers["set_pi_path"];
     }
     case "mention_tabs":

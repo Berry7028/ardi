@@ -4,4 +4,4 @@ import { startBackground } from "../../../background";
 import target from "../target.json";
 import { connectBrowser } from "./browser";
 
-startBackground({ nativeHost: target.nativeHost, connectBrowser });
+startBackground({ nativeHost: target.nativeHost, connectBrowser, panelPerTab: true });

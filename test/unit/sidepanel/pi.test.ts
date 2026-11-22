@@ -21,8 +21,10 @@ test("a prompt with an image bigger than one Chrome message reaches the backgrou
   await waitFor(() => expect(port.sent.length).toBeGreaterThan(1));
   const requests: PanelRequest[] = [];
   port.sent.forEach(joinParts<PanelRequest>((request) => requests.push(request)));
-  expect(requests).toHaveLength(1);
-  expect(requests[0].kind === "prompt" && requests[0].images![0].data.length).toBe(data.length);
+  expect(requests[0].kind).toBe("attach");
+  const prompts = requests.filter((r) => r.kind === "prompt");
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0].kind === "prompt" && prompts[0].images![0].data.length).toBe(data.length);
 
   const chunk: ChatChunk = { type: "user", text: "look", images: [{ data: "aGk=", mimeType: "image/png" }], at: 1 };
   for (const part of toParts({ kind: "live", chunk }, 8)) port.receive(part);
@@ -40,8 +42,8 @@ test("requests go out in the order they were made, even while a prompt's images 
   client.send({ kind: "prompt", text: "second" });
   client.send({ kind: "new_session" });
   read();
-  await waitFor(() => expect(port.sent).toHaveLength(3));
-  expect(port.sent.map((r: PanelRequest) => (r.kind === "prompt" ? r.text : r.kind))).toEqual(["first", "second", "new_session"]);
+  await waitFor(() => expect(port.sent).toHaveLength(4));
+  expect(port.sent.map((r: PanelRequest) => (r.kind === "prompt" ? r.text : r.kind))).toEqual(["attach", "first", "second", "new_session"]);
 });
 
 test("a prompt that ends up empty (its only image couldn't be read) isn't sent", async () => {
@@ -50,7 +52,8 @@ test("a prompt that ends up empty (its only image couldn't be read) isn't sent",
   const [port] = chromeFake.ports;
   client.send(Promise.resolve(null));
   client.send({ kind: "abort" });
-  await waitFor(() => expect(port.sent).toEqual([{ kind: "abort" }]));
+  // Stop posts at once; the attach resolves through the outbox behind it.
+  await waitFor(() => expect(port.sent).toEqual([{ kind: "abort" }, { kind: "attach", windowId: 1 }]));
 });
 
 test("stop goes at once, without waiting for a prompt still reading its images", () => {
@@ -75,7 +78,8 @@ test("a request that fails to post doesn't stop the ones after it", async () => 
   const errors = spyOn(console, "error").mockImplementation(noop);
   client.send({ kind: "new_session" });
   client.send({ kind: "compact" });
-  await waitFor(() => expect(port.sent).toEqual([{ kind: "compact" }]));
+  // The attach was the post that failed; the requests after it went through.
+  await waitFor(() => expect(port.sent).toEqual([{ kind: "new_session" }, { kind: "compact" }]));
   errors.mockRestore();
 });
 
@@ -84,5 +88,7 @@ test("a request made while the panel reconnects goes to the new connection", asy
   client.connect();
   chromeFake.ports[0].close();
   client.send({ kind: "new_session" });
-  await waitFor(() => expect(chromeFake.ports[1]?.sent).toEqual([{ kind: "new_session" }]));
+  await waitFor(() =>
+    expect(chromeFake.ports[1]?.sent).toEqual([{ kind: "attach", windowId: 1 }, { kind: "new_session" }, { kind: "attach", windowId: 1 }])
+  );
 });

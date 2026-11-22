@@ -17,6 +17,9 @@ export type SessionMeta = {
   id: number;
   title: string;
   piSessionFile?: string;
+  // The browser tab this chat belongs to, on targets with per-tab panels.
+  // Unset: a shared chat (a scheduled run's, or from before per-tab panels).
+  tabId?: number;
   // A scheduled run happened here while it was off screen; cleared once opened.
   unread?: boolean;
   createdAt: number;
@@ -25,6 +28,9 @@ export type SessionMeta = {
 
 // Side panel -> background, over the panel's port.
 export type PanelRequest =
+  // First message from a tab-scoped panel: the window it opened in, so the
+  // background can bind it to that window's active tab.
+  | { kind: "attach"; windowId: number }
   // `steer`: if pi is working, it takes this after the current step instead
   // of once it's done.
   | { kind: "prompt"; text: string; images?: ImageAttachment[]; steer?: boolean }

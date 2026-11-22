@@ -59,9 +59,9 @@ export function normalizeOcEvent(event: OcEvent, state: OcNormState): ChatChunk[
       return chunks;
     }
     case "session.text.delta":
-      return [{ type: "text", content: String(data.delta ?? "") }];
+      return typeof data.delta === "string" ? [{ type: "text", content: data.delta }] : [];
     case "session.reasoning.delta":
-      return [{ type: "thinking", content: String(data.delta ?? "") }];
+      return typeof data.delta === "string" ? [{ type: "thinking", content: data.delta }] : [];
     case "session.tool.input.started": {
       if (typeof data.id === "string" && typeof data.name === "string") state.toolNames.set(data.id, data.name);
       return [];

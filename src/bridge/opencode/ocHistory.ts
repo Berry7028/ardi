@@ -32,7 +32,7 @@ function toolCall(content: OcContent): ToolCall | undefined {
     name: asString(content.name) || "tool",
     input: state?.input ?? {},
     status,
-    result: status === "error" ? ((state?.error as { message?: string } | undefined)?.message ?? "Tool failed") : contentText(state?.content),
+    result: status === "error" ? (state?.error?.message ?? "Tool failed") : contentText(state?.content),
     details: state?.metadata,
   };
 }
@@ -93,7 +93,7 @@ export function readOcHistory(entries: OcHistoryEntry[]): ChatMessage[] {
       run = { id: asString(entry.id), blocks: [], toolCalls: [], from, timestamp: at(entry), outputTokens: 0, interrupted: false };
     }
     for (const part of content) {
-      switch (part.type) {
+      switch (part.type ?? "") {
         case "text":
           if (textOf(part)) run.blocks.push({ type: "text", content: textOf(part) });
           break;

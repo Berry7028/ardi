@@ -688,8 +688,9 @@ export async function restart(p: chrome.runtime.Port) {
 // Restarts every chat's pi: settings changed.
 export async function restartAll() {
   await ready;
-  for (const c of new Set([...bound.values(), ...away])) {
-    if (c.connection.state === "down") continue;
+  for (const c of new Set([...screens.values(), ...bound.values(), ...away])) {
+    // Never-started chats that nobody's looking at come up lazily instead.
+    if (c.connection.state === "down" && !onScreen(c)) continue;
     await closeConnection(c, "hand back");
     await startChat(c);
   }

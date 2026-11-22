@@ -134,6 +134,18 @@ test("a check-back for a closed panel's chat runs on the same chat, not a duplic
   expect(last("replay", reopened)?.session.id).toBe(chat.id);
 });
 
+test("a repaired pi path revives the disconnected chat on screen", async () => {
+  const port = await attach(10);
+  await pi.prompt(port.port, "hello");
+  const old = chromeFake.nativePorts.at(-1)!;
+  old.close();
+  await waitFor(() => expect(last("replay", port)?.status).toBe("disconnected"));
+
+  await pi.restartAll();
+  expect(chromeFake.nativePorts.length).toBeGreaterThan(1);
+  expect(chromeFake.nativePorts.at(-1)!.disconnected).toBe(false);
+});
+
 test("a chat not bound to a tab (a scheduled run's) is listed on every panel and binds to the tab that opens it", async () => {
   const shared = await store.addSession({ title: "job run", createdAt: 1, updatedAt: 1 });
   const port = await attach(10);

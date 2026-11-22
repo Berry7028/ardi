@@ -490,6 +490,7 @@ async function switchTo(p: chrome.runtime.Port, next: SessionMeta, { stopLeft = 
   }
   if (tabId === GLOBAL) {
     // One chat, shared by every panel: they all replay it.
+    bound.set(GLOBAL, shown);
     for (const p2 of panels) {
       screens.set(p2, shown);
       postInParts(p2, replay(shown));

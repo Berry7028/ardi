@@ -325,6 +325,14 @@ describe("background pi session", () => {
     expect(last("restore", await attach())).toEqual({ kind: "restore", text: "keep me" });
   });
 
+  test("a panel that reattaches comes back to the chat the user switched to", async () => {
+    await storedChat();
+    const second = await store.addSession({ title: "second", createdAt: 1, updatedAt: 1 });
+    await pi.switchSession(panel.port, second.id);
+    const reopened = await attach();
+    expect(last("replay", reopened)?.session.id).toBe(second.id);
+  });
+
   test("a message stored while pi restarts goes to the new pi and isn't also handed back", async () => {
     let disposed!: () => void;
     setTarget({ nativeHost: "com.ardi.test", connectBrowser: () => ({ receive() {}, preparePrompt: () => () => {}, cancel() {}, dispose: () => new Promise<void>((resolve) => (disposed = resolve)) }) });

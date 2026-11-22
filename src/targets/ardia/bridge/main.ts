@@ -6,4 +6,11 @@ import { runBridge } from "../../../bridge/host";
 import target from "../target.json";
 import { profileTabs } from "./tabs";
 
-await runBridge({ extension: resolve(import.meta.dirname, "../agent/extension"), tools: target.tools, mentionableTabs: profileTabs });
+import { BROWSER_GUIDE } from "../agent/extension/guide";
+
+await runBridge({
+  extension: resolve(import.meta.dirname, "../agent/extension"),
+  tools: target.tools,
+  mentionableTabs: profileTabs,
+  opencode: { mcpServer: resolve(import.meta.dirname, "../agent/mcp/mcp-server.js"), guide: [BROWSER_GUIDE] },
+});

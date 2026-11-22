@@ -10,13 +10,16 @@ export const PANEL_PORT = "sidepanel";
 
 export type PiStatus = "connecting" | "connected" | "disconnected";
 
-// A chat in Ardi's list. `id` is Ardi's local database key. pi's session file
-// is the record of the conversation; `piSessionFile` points at it, and the
-// bridge resumes it with --session.
+// A chat in Ardi's list. `id` is Ardi's local database key. The agent's
+// session is the record of the conversation: `piSessionFile` or
+// `ocSessionId` points at it, and the bridge resumes it.
 export type SessionMeta = {
   id: number;
   title: string;
+  // The agent this chat runs (set when it's first started; absent = pi).
+  agent?: "pi" | "opencode";
   piSessionFile?: string;
+  ocSessionId?: string;
   // A scheduled run happened here while it was off screen; cleared once opened.
   unread?: boolean;
   createdAt: number;
@@ -57,6 +60,11 @@ export type PanelUpdate =
 export type Settings = {
   // pi's executable. Empty: the pi found by the installer.
   piPath: string;
+  // The agent chats run on: pi, or opencode (which needs opencodePath or
+  // an `opencode` on PATH).
+  agent: "pi" | "opencode";
+  // opencode's executable. Empty: `opencode` on PATH.
+  opencodePath: string;
 };
 
 // The panel's one-off questions (the settings screen's, the @ menu's), sent
@@ -67,6 +75,11 @@ export type PanelQuestion =
   // Saves a new pi path if it checks out (empty, back to the installed pi,
   // always saves), then restarts pi if it works.
   | { kind: "set_pi_path"; piPath: string }
+  // Saves a new opencode path if it checks out (empty, back to `opencode`
+  // on PATH, always saves).
+  | { kind: "set_opencode_path"; opencodePath: string }
+  // Saves the agent new chats run on. Doesn't touch chats already started.
+  | { kind: "set_agent"; agent: "pi" | "opencode" }
   // The tabs the @ menu may list; null for any web page tab.
   | { kind: "mention_tabs" }
   // Scheduled jobs (not check-backs): list, create or change (pause too), delete.
@@ -76,8 +89,10 @@ export type PanelQuestion =
 
 // The answer to each kind of PanelQuestion.
 export type PanelAnswers = {
-  get_settings: { settings: Settings; check: PiCheck };
+  get_settings: { settings: Settings; check: PiCheck; ocCheck: PiCheck };
   set_pi_path: { saved: boolean; check: PiCheck };
+  set_opencode_path: { saved: boolean; check: PiCheck };
+  set_agent: { saved: boolean };
   mention_tabs: { tabs: TabMention[] | null };
   list_jobs: { jobs: Job[] };
   // `error`: why it wasn't saved (a time that has passed).

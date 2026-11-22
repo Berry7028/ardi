@@ -81,7 +81,7 @@ describe("background pi session", () => {
     const text = "Plan a trip like [@Kyoto in 3 days](https://example.com/kyoto), with temples, food markets and a day in Nara";
     await pi.prompt(text);
     expect(bridge().sent).toEqual([
-      { type: "start", sessionFile: undefined, piPath: undefined },
+      { type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined },
       { type: "prompt", text, promptId: expect.any(String) },
     ]);
     // The chat shows it once pi starts it.
@@ -179,7 +179,7 @@ describe("background pi session", () => {
     await pi.restart();
     expect(old.disconnected).toBe(true);
     expect(bridge()).not.toBe(old);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: SESSION_FILE, piPath: "/opt/pi" }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: SESSION_FILE, piPath: "/opt/pi", ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("status")).toEqual({ kind: "status", status: "connecting" });
   });
 
@@ -188,7 +188,7 @@ describe("background pi session", () => {
     const old = bridge();
     await pi.newSession();
     expect(bridge()).not.toBe(old);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: undefined, piPath: undefined }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("replay")).toMatchObject({ session: { id: 0 }, history: [], live: [] });
 
     ready("/sessions/new.jsonl");
@@ -225,7 +225,7 @@ describe("background pi session", () => {
     await pi.newSession();
     ready("/sessions/new.jsonl");
     await pi.switchSession(chat.id);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: SESSION_FILE, piPath: undefined }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: SESSION_FILE, piPath: undefined, ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("replay")?.session.id).toBe(chat.id);
   });
 
@@ -257,7 +257,7 @@ describe("background pi session", () => {
     await pi.deleteSession(chat.id);
     expect(await store.listSessions()).toEqual([]);
     expect(old.disconnected).toBe(true);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: undefined, piPath: undefined }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("replay")?.session.id).toBe(0);
     expect(last("sessions")).toEqual({ kind: "sessions", sessions: [], currentId: 0, running: [] });
   });

@@ -10,7 +10,14 @@ export class SettingsView {
   private readonly version: HTMLElement;
   private readonly toggle: HTMLElement;
   private readonly pathRow: HTMLElement;
+  private readonly agent: HTMLSelectElement;
+  private readonly ocPath: HTMLInputElement;
+  private readonly ocStatus: HTMLElement;
+  private readonly ocVersion: HTMLElement;
+  private readonly ocToggle: HTMLElement;
+  private readonly ocPathRow: HTMLElement;
   private saved = "";
+  private ocSaved = "";
 
   constructor(private readonly root: HTMLElement) {
     this.path = root.querySelector("#pi-path")!;
@@ -18,11 +25,23 @@ export class SettingsView {
     this.version = root.querySelector("#pi-version")!;
     this.toggle = root.querySelector("#pi-toggle")!;
     this.pathRow = root.querySelector("#pi-path-row")!;
+    this.agent = root.querySelector("#agent-select")!;
+    this.ocPath = root.querySelector("#oc-path")!;
+    this.ocStatus = root.querySelector("#oc-check")!;
+    this.ocVersion = root.querySelector("#oc-version")!;
+    this.ocToggle = root.querySelector("#oc-toggle")!;
+    this.ocPathRow = root.querySelector("#oc-path-row")!;
     this.toggle.addEventListener("click", () => this.expand(this.toggle.getAttribute("aria-expanded") !== "true"));
+    this.ocToggle.addEventListener("click", () => this.ocExpand(this.ocToggle.getAttribute("aria-expanded") !== "true"));
     this.path.addEventListener("change", () => void this.commitPath());
     this.path.addEventListener("keydown", (e) => {
       if (e.key === "Enter") this.path.blur();
     });
+    this.ocPath.addEventListener("change", () => void this.commitOcPath());
+    this.ocPath.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.ocPath.blur();
+    });
+    this.agent.addEventListener("change", () => void this.commitAgent());
     root.querySelector("#settings-close")!.addEventListener("click", () => this.close());
     root.addEventListener("keydown", (e) => {
       if (e.key === "Escape") this.close();
@@ -38,10 +57,17 @@ export class SettingsView {
   async open() {
     this.root.hidden = false;
     this.path.disabled = true;
-    const { settings, check } = await askBackground({ kind: "get_settings" });
+    this.ocPath.disabled = true;
+    this.agent.disabled = true;
+    const { settings, check, ocCheck } = await askBackground({ kind: "get_settings" });
     this.saved = this.path.value = settings.piPath;
+    this.ocSaved = this.ocPath.value = settings.opencodePath;
+    this.agent.value = settings.agent;
     this.path.disabled = false;
+    this.ocPath.disabled = false;
+    this.agent.disabled = false;
     this.show(check);
+    this.showOc(ocCheck);
   }
 
   close() {
@@ -60,12 +86,38 @@ export class SettingsView {
     this.show(check);
   }
 
+  private async commitOcPath() {
+    const value = this.ocPath.value.trim();
+    this.ocPath.value = value;
+    if (value === this.ocSaved) return;
+    this.ocStatus.dataset.state = "";
+    this.ocStatus.textContent = "Checking…";
+    const { saved, check } = await askBackground({ kind: "set_opencode_path", opencodePath: value });
+    if (saved) this.ocSaved = value;
+    this.showOc(check);
+  }
+
+  private async commitAgent() {
+    await askBackground({ kind: "set_agent", agent: this.agent.value as "pi" | "opencode" });
+    // Show the harness the chat now runs on: check it so its state shows.
+    const { settings, check, ocCheck } = await askBackground({ kind: "get_settings" });
+    this.agent.value = settings.agent;
+    this.show(check);
+    this.showOc(ocCheck);
+  }
+
   // The CLI path sits folded under the Pi row; it opens with the row, or by
   // itself when Pi doesn't run, so the error under it shows.
   private expand(open: boolean) {
     this.pathRow.hidden = !open;
     this.toggle.setAttribute("aria-expanded", String(open));
     if (open) this.path.focus();
+  }
+
+  private ocExpand(open: boolean) {
+    this.ocPathRow.hidden = !open;
+    this.ocToggle.setAttribute("aria-expanded", String(open));
+    if (open) this.ocPath.focus();
   }
 
   // A working Pi shows its version by the name; a failed check shows why
@@ -77,5 +129,13 @@ export class SettingsView {
     this.status.dataset.state = check.error ? "error" : "";
     this.status.textContent = check.error ?? "";
     if (check.version) this.version.textContent = check.version;
+  }
+
+  private showOc(check: PiCheck) {
+    if (check.error) this.ocExpand(true);
+    if (!this.ocPath.value) this.ocPath.placeholder = check.command;
+    this.ocStatus.dataset.state = check.error ? "error" : "";
+    this.ocStatus.textContent = check.error ?? "";
+    if (check.version) this.ocVersion.textContent = check.version;
   }
 }

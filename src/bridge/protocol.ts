@@ -26,12 +26,15 @@ export type ScheduleReply = { type: "schedule_reply"; id: string; result?: unkno
 export type BridgeRequest =
   | BrowserReply
   | ScheduleReply
-  // Starts pi (`piPath`, or the installed pi). Resumes `sessionFile` if it
-  // exists; otherwise pi starts a new session. A bridge's pi stays on that
-  // session for life: each chat has its own bridge.
-  | { type: "start"; sessionFile?: string; piPath?: string }
+  // Starts the chat's agent: pi (`piPath`, or the installed pi) resuming
+  // `sessionFile`, or opencode (`opencodePath`, or the installed opencode)
+  // resuming `ocSessionId`. A bridge's agent stays on that session for
+  // life: each chat has its own bridge.
+  | { type: "start"; agent?: "pi" | "opencode"; sessionFile?: string; piPath?: string; ocSessionId?: string; opencodePath?: string }
   // Runs `pi --version` without starting pi. Answered with `pi_check`.
   | { type: "check_pi"; piPath?: string }
+  // Runs `opencode --version` without starting opencode. Answered with `oc_check`.
+  | { type: "check_opencode"; opencodePath?: string }
   // The tabs the user may @ mention. Answered with `tabs`.
   | { type: "list_tabs" }
   // pi starts a run with it, or while it works queues it: to take after its
@@ -54,8 +57,9 @@ export type SessionUpdate =
   // A saved session's history, read from its file as soon as `start` asks
   // for it, so the chat shows while pi starts.
   | { type: "history"; sessionFile: string; history: ChatMessage[] }
-  // pi is up: the session file it's on, and its history so far.
-  | { type: "ready"; sessionFile?: string; history: ChatMessage[]; model: ModelState; commands: PiCommand[] }
+  // The agent is up: the session it's on (pi's file, opencode's id), and
+  // its history so far.
+  | { type: "ready"; sessionFile?: string; ocSessionId?: string; history: ChatMessage[]; model: ModelState; commands: PiCommand[] }
   // The model or thinking level changed.
   | { type: "model"; model: ModelState }
   | { type: "chunk"; chunk: ChatChunk }
@@ -78,6 +82,7 @@ export type BridgeEvent =
   // Messages taken back (a stop, an edit, or rejected by pi), for the message box.
   | { type: "restore"; text: string; images?: ImageAttachment[] }
   | ({ type: "pi_check" } & PiCheck)
+  | ({ type: "oc_check" } & PiCheck)
   // null: the target doesn't narrow them, so any open tab will do.
   | { type: "tabs"; tabs: TabMention[] | null }
   // pi failed to start or exited; the bridge exits after sending this.

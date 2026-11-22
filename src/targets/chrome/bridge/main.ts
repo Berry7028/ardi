@@ -10,4 +10,5 @@ await runBridge({
   extension: resolve(import.meta.dirname, "../agent/extension"),
   tools: target.tools,
   relay: (send) => ChromeBrowserRelay.start(send),
+  opencode: { mcpServer: resolve(import.meta.dirname, "../agent/mcp/mcp-server.js") },
 });

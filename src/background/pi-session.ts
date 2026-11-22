@@ -263,11 +263,12 @@ async function onBridgeEvent(c: Chat, conn: Live, event: Exclude<BridgeEvent, { 
       break;
     }
     case "ready": {
-      // The bridge reports the session pi is on; for a new chat that's the
-      // first time Ardi learns its file.
+      // The bridge reports the session its agent is on; for a new chat
+      // that's the first time Ardi learns its file (pi) or id (opencode).
       const { meta } = c;
-      if (event.sessionFile !== meta.piSessionFile) {
+      if (event.sessionFile !== meta.piSessionFile || event.ocSessionId !== meta.ocSessionId) {
         meta.piSessionFile = event.sessionFile;
+        meta.ocSessionId = event.ocSessionId;
         if (!isDraft(meta)) await store.putSession(meta);
       }
       // History is everything pi saved before it started.
@@ -320,6 +321,7 @@ async function onBridgeEvent(c: Chat, conn: Live, event: Exclude<BridgeEvent, { 
       break;
     }
     case "pi_check":
+    case "oc_check":
     case "tabs":
       // Only sent to the one-shot ports of ask-bridge.ts.
       break;
@@ -345,7 +347,7 @@ export async function start(): Promise<void> {
 }
 
 async function connect(c: Chat, starting: Connection) {
-  const { piPath } = await loadSettings();
+  const saved = await loadSettings();
   // Restarted, stopped or left while settings were read.
   if (c.connection !== starting) return;
   // What pi sent belongs to the pi that's gone.
@@ -371,7 +373,10 @@ async function connect(c: Chat, starting: Connection) {
     settle(c);
   });
   setConnection(c, conn);
-  post(c, { type: "start", sessionFile: c.meta.piSessionFile, piPath: piPath || undefined });
+  // The chat's agent is fixed once it first starts (a new chat follows the
+  // setting then current).
+  const agent = (c.meta.agent ??= saved.agent);
+  post(c, { type: "start", agent, sessionFile: c.meta.piSessionFile, piPath: saved.piPath || undefined, ocSessionId: c.meta.ocSessionId, opencodePath: saved.opencodePath || undefined });
 }
 
 // What the panel and settings ask for runs one request at a time, in the

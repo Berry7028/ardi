@@ -69,12 +69,24 @@ async function answer(req: PanelQuestion) {
   switch (req.kind) {
     case "get_settings": {
       const saved = await settings.loadSettings();
-      return { settings: saved, check: await settings.checkPi(saved.piPath) } satisfies PanelAnswers["get_settings"];
+      const ocCheck = saved.agent === "opencode" ? await settings.checkOpenCode(saved.opencodePath) : { command: saved.opencodePath || "opencode" };
+      return { settings: saved, check: await settings.checkPi(saved.piPath), ocCheck } satisfies PanelAnswers["get_settings"];
     }
     case "set_pi_path": {
       const result = await settings.setPiPath(req.piPath);
       if (result.saved && !result.check.error) await pi.restart();
       return result satisfies PanelAnswers["set_pi_path"];
+    }
+    case "set_opencode_path": {
+      const result = await settings.setOpenCodePath(req.opencodePath);
+      if (result.saved && !result.check.error) await pi.restart();
+      return result satisfies PanelAnswers["set_opencode_path"];
+    }
+    case "set_agent": {
+      await settings.setAgent(req.agent);
+      // Applies to the chat on screen too if it hasn't started yet.
+      await pi.restart();
+      return { saved: true } satisfies PanelAnswers["set_agent"];
     }
     case "mention_tabs":
       return { tabs: await mentionableTabs() } satisfies PanelAnswers["mention_tabs"];

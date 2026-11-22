@@ -45,7 +45,7 @@ describe("setPiPath", () => {
   test("saves a path where pi runs", async () => {
     bridgeThatChecks(["/opt/pi"]);
     expect(await setPiPath("/opt/pi")).toEqual({ saved: true, check: { command: "/opt/pi", version: "1.4.0" } });
-    expect(await loadSettings()).toEqual({ piPath: "/opt/pi" });
+    expect(await loadSettings()).toEqual({ piPath: "/opt/pi", agent: "pi", opencodePath: "" });
   });
 
   test("keeps the old path when the new one doesn't run", async () => {
@@ -54,7 +54,7 @@ describe("setPiPath", () => {
     const result = await setPiPath("/typo/pi");
     expect(result.saved).toBe(false);
     expect(result.check.error).toContain("/typo/pi");
-    expect(await loadSettings()).toEqual({ piPath: "/opt/pi" });
+    expect(await loadSettings()).toEqual({ piPath: "/opt/pi", agent: "pi", opencodePath: "" });
   });
 
   test("clearing the path always saves, even if the installed pi is broken", async () => {
@@ -63,6 +63,6 @@ describe("setPiPath", () => {
     const result = await setPiPath("");
     expect(result.saved).toBe(true);
     expect(result.check.error).toBeDefined();
-    expect(await loadSettings()).toEqual({ piPath: "" });
+    expect(await loadSettings()).toEqual({ piPath: "", agent: "pi", opencodePath: "" });
   });
 });

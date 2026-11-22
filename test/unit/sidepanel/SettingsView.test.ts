@@ -22,7 +22,7 @@ function background({ working = ["/opt/pi"], hold = false } = {}) {
     requests.push(req);
     if (req.kind === "get_settings") {
       if (hold) await held;
-      return { settings: { piPath: savedPath }, check: check(savedPath) };
+      return { settings: { piPath: savedPath, agent: "pi", opencodePath: "" }, check: check(savedPath), ocCheck: { command: "opencode" } };
     }
     if (req.kind !== "set_pi_path") return;
     const result = check(req.piPath);

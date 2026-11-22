@@ -81,7 +81,7 @@ describe("background pi session", () => {
     const text = "Plan a trip like [@Kyoto in 3 days](https://example.com/kyoto), with temples, food markets and a day in Nara";
     await pi.prompt(text);
     expect(bridge().sent).toEqual([
-      { type: "start", sessionFile: undefined, piPath: undefined },
+      { type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined },
       { type: "prompt", text, promptId: expect.any(String) },
     ]);
     // The chat shows it once pi starts it.
@@ -179,7 +179,7 @@ describe("background pi session", () => {
     await pi.restart();
     expect(old.disconnected).toBe(true);
     expect(bridge()).not.toBe(old);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: SESSION_FILE, piPath: "/opt/pi" }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: SESSION_FILE, piPath: "/opt/pi", ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("status")).toEqual({ kind: "status", status: "connecting" });
   });
 
@@ -188,7 +188,7 @@ describe("background pi session", () => {
     const old = bridge();
     await pi.newSession();
     expect(bridge()).not.toBe(old);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: undefined, piPath: undefined }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("replay")).toMatchObject({ session: { id: 0 }, history: [], live: [] });
 
     ready("/sessions/new.jsonl");
@@ -220,12 +220,36 @@ describe("background pi session", () => {
     await sending;
   });
 
+  test("a chat stored before the agent setting still runs pi after switching to opencode", async () => {
+    // Stored chats with a piSessionFile are pi chats even with no agent on them.
+    const meta = await store.addSession({ title: "Old chat", piSessionFile: SESSION_FILE, createdAt: 1, updatedAt: 1 });
+    chromeFake.storage.set("settings", { agent: "opencode" });
+    await pi.switchSession(meta.id);
+    expect(bridge().sent[0]).toMatchObject({ type: "start", agent: "pi", sessionFile: SESSION_FILE });
+  });
+
+  test("an ocSessionId the bridge reports while the first message is being stored is kept", async () => {
+    chromeFake.storage.set("settings", { agent: "opencode" });
+    // oxlint-disable-next-line typescript/unbound-method -- called below with the store as `this`
+    const { add } = IDBObjectStore.prototype;
+    IDBObjectStore.prototype.add = function (...args) {
+      fromBridge({ type: "ready", ocSessionId: "ses_1", history: HISTORY, model: { models: [] }, commands: [] });
+      return add.apply(this, args);
+    };
+    try {
+      await pi.prompt("hello");
+    } finally {
+      IDBObjectStore.prototype.add = add;
+    }
+    await waitFor(async () => expect((await store.listSessions())[0].ocSessionId).toBe("ses_1"));
+  });
+
   test("switching back to a stored chat starts pi on its session file", async () => {
     const chat = await storedChat();
     await pi.newSession();
     ready("/sessions/new.jsonl");
     await pi.switchSession(chat.id);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: SESSION_FILE, piPath: undefined }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: SESSION_FILE, piPath: undefined, ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("replay")?.session.id).toBe(chat.id);
   });
 
@@ -257,7 +281,7 @@ describe("background pi session", () => {
     await pi.deleteSession(chat.id);
     expect(await store.listSessions()).toEqual([]);
     expect(old.disconnected).toBe(true);
-    expect(bridge().sent).toEqual([{ type: "start", sessionFile: undefined, piPath: undefined }]);
+    expect(bridge().sent).toEqual([{ type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined }]);
     expect(last("replay")?.session.id).toBe(0);
     expect(last("sessions")).toEqual({ kind: "sessions", sessions: [], currentId: 0, running: [] });
   });

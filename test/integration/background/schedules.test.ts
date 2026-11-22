@@ -71,7 +71,7 @@ describe("scheduled jobs", () => {
 
     await fire(job.id);
     expect(bridge().sent).toEqual([
-      { type: "start", sessionFile: undefined, piPath: undefined },
+      { type: "start", agent: "pi", sessionFile: undefined, piPath: undefined, ocSessionId: undefined, opencodePath: undefined },
       { type: "set_model", provider: "fake", modelId: "m2" },
       { type: "set_thinking_level", level: "high" },
       { type: "prompt", text: "[Scheduled job: Invoice check]\n\nfind new invoices", promptId: expect.any(String) },
@@ -231,7 +231,7 @@ describe("pi's check_back tool", () => {
 
     await fire(armed()[0]);
     expect(bridge()).not.toBe(port);
-    expect(bridge().sent[0]).toEqual({ type: "start", sessionFile: meta.piSessionFile, piPath: undefined });
+    expect(bridge().sent[0]).toEqual({ type: "start", agent: "pi", sessionFile: meta.piSessionFile, piPath: undefined, ocSessionId: undefined, opencodePath: undefined });
     expect(bridge().sent.at(-1)).toMatchObject({ type: "prompt", text: "[Check-back] is the deploy done?" });
     expect((await store.getSession(meta.id))?.unread).toBe(true);
   });

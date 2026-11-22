@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const FAKE_PI_SOURCE = resolve(import.meta.dirname, "../fixtures/fake-pi.ts");
+const FAKE_OC_SOURCE = resolve(import.meta.dirname, "../fixtures/fake-opencode.ts");
 
 // The Node that runs the fake pi and, in release tests, the bridge and installer.
 const found = Bun.which("node");
@@ -69,3 +70,13 @@ export function fakePi(dir: string): string {
 }
 
 export const FAKE_PI = process.platform === "win32" ? fakePi(join(homedir(), "fake-pi")) : FAKE_PI_SOURCE;
+
+// Installs the fake opencode as `opencode` in `dir`, and returns the path to run.
+export function fakeOpencode(dir: string): string {
+  if (process.platform === "win32") return executable("opencode", `await import(${JSON.stringify(pathToFileURL(FAKE_OC_SOURCE).href)});`, dir);
+  mkdirSync(dir, { recursive: true });
+  symlinkSync(FAKE_OC_SOURCE, join(dir, "opencode"));
+  return join(dir, "opencode");
+}
+
+export const FAKE_OC = process.platform === "win32" ? fakeOpencode(join(homedir(), "fake-opencode")) : FAKE_OC_SOURCE;

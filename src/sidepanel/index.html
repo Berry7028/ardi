@@ -124,6 +124,16 @@
           <h3>Agent</h3>
           <div class="group">
             <div class="row">
+              <div class="row-text">
+                <label class="row-name" for="agent-select">Harness</label>
+                <span class="row-desc">New chats run on this agent.</span>
+              </div>
+              <select class="text-input" id="agent-select">
+                <option value="pi">Pi</option>
+                <option value="opencode">OpenCode</option>
+              </select>
+            </div>
+            <div class="row">
               <button type="button" class="row-text row-toggle" id="pi-toggle" aria-expanded="false" aria-controls="pi-path-row" title="CLI path">
                 <span class="row-name">Pi <span class="version" id="pi-version"></span><svg class="chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4.5 10 8l-3.5 3.5" /></svg></span>
                 <span class="row-desc pi-status"><span class="dot" id="status" data-state="disconnected"></span><span id="status-text">Not running</span></span>
@@ -137,6 +147,19 @@
               </div>
               <input class="text-input" id="pi-path" type="text" spellcheck="false" autocomplete="off" />
               <p class="check" id="pi-check"></p>
+            </div>
+            <div class="row">
+              <button type="button" class="row-text row-toggle" id="oc-toggle" aria-expanded="false" aria-controls="oc-path-row" title="CLI path">
+                <span class="row-name">OpenCode <span class="version" id="oc-version"></span><svg class="chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 4.5 10 8l-3.5 3.5" /></svg></span>
+              </button>
+            </div>
+            <div class="row stack" id="oc-path-row" hidden>
+              <div class="row-text">
+                <label class="row-name" for="oc-path">CLI path</label>
+                <span class="row-desc">Leave empty to use <code>opencode</code> on PATH.</span>
+              </div>
+              <input class="text-input" id="oc-path" type="text" spellcheck="false" autocomplete="off" />
+              <p class="check" id="oc-check"></p>
             </div>
           </div>
         </section>

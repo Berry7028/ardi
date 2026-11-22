@@ -12,5 +12,5 @@ await runBridge({
   extension: resolve(import.meta.dirname, "../agent/extension"),
   tools: target.tools,
   mentionableTabs: profileTabs,
-  opencode: { mcpServer: resolve(import.meta.dirname, "../agent/mcp/mcp-server.js"), guide: [BROWSER_GUIDE] },
+  opencode: { mcpServer: resolve(import.meta.dirname, "../agent/mcp/index.js"), guide: [BROWSER_GUIDE] },
 });

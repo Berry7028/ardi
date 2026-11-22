@@ -375,7 +375,7 @@ async function connect(c: Chat, starting: Connection) {
   setConnection(c, conn);
   // The chat's agent is fixed once it first starts (a new chat follows the
   // setting then current).
-  const agent = (c.meta.agent ??= saved.agent);
+  const agent = (c.meta.agent ??= c.meta.piSessionFile ? "pi" : saved.agent);
   post(c, { type: "start", agent, sessionFile: c.meta.piSessionFile, piPath: saved.piPath || undefined, ocSessionId: c.meta.ocSessionId, opencodePath: saved.opencodePath || undefined });
 }
 
@@ -510,8 +510,8 @@ async function send(c: Chat, text: string, images?: ImageAttachment[], steer = f
     const { id: _, ...meta } = current;
     const stored = await store.addSession({ ...meta, title: plainMentions(text).slice(0, TITLE_LEN) });
     // `ready` can name the session file while the chat is being stored.
-    setMeta(c, { ...stored, piSessionFile: current.piSessionFile });
-    if (c.meta.piSessionFile !== stored.piSessionFile) await store.putSession(c.meta);
+    setMeta(c, { ...stored, piSessionFile: current.piSessionFile, ocSessionId: current.ocSessionId });
+    if (c.meta.piSessionFile !== stored.piSessionFile || c.meta.ocSessionId !== stored.ocSessionId) await store.putSession(c.meta);
     queueMicrotask(() => void broadcastSessions());
   } else {
     await store.putSession(current);

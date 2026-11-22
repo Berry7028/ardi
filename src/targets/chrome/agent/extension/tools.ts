@@ -2,12 +2,13 @@
 // OpenCode's MCP server (../browserTools.ts); this only adapts the result:
 // pi resizes images for its model's limits.
 
+import { resolve } from "node:path";
 import { resizeImage, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { TOOLS } from "../browserTools";
 import type { ToolResult } from "../../../../agent/lib/toolDef";
 
 export default function registerChromeTools(pi: ExtensionAPI) {
-  for (const tool of TOOLS) {
+  for (const tool of TOOLS(resolve(import.meta.dirname, "../references"))) {
     pi.registerTool({
       name: tool.name,
       label: tool.label ?? tool.name,

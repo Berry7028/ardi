@@ -5,6 +5,7 @@
 // (../browserTools.ts); this adapts results (pi resizes images for its
 // model's limits) and supplies each call's chat session id.
 
+import { resolve } from "node:path";
 import { resizeImage, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerDate } from "../../../../agent/lib/date";
 import { registerEnvironment } from "../../../../agent/lib/environment";
@@ -20,7 +21,7 @@ export default function (pi: ExtensionAPI) {
     event.systemPromptOptions.sections = { ...event.systemPromptOptions.sections, browser: BROWSER_GUIDE };
   });
 
-  for (const tool of TOOLS) {
+  for (const tool of TOOLS(resolve(import.meta.dirname, "../references"))) {
     pi.registerTool({
       name: tool.name,
       label: tool.label ?? tool.name,

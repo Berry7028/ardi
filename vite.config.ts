@@ -33,7 +33,7 @@ function host(): Plugin {
       // Pi supplies its own SDK and typebox to extensions.
       bun([join(targetDir, "agent/extension/index.ts"), "--target=node", "--external", "@earendil-works/pi-coding-agent", "--external", "typebox", "--outdir", join(out, "agent/extension")], "the Pi extension");
       // The MCP stdio server OpenCode spawns for the same tools.
-      bun([join(targetDir, "agent/mcp-server.ts"), "--target=node", "--outdir", join(out, "agent/mcp")], "the MCP server");
+      bun([join(targetDir, "agent/mcp/index.ts"), "--target=node", "--outdir", join(out, "agent/mcp")], "the MCP server");
       cpSync(resolve(root, "src/agent/system-prompt.md"), join(out, "agent/system-prompt.md"));
       cpSync(join(targetDir, "agent/references"), join(out, "agent/references"), { recursive: true, filter: (path) => !path.endsWith(".DS_Store") });
       // For the installer: the native host name and loading instructions.

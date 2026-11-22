@@ -194,6 +194,13 @@ function onScreen(c: Chat): boolean {
   return false;
 }
 
+// The live chat object with session `id`: on a screen, bound to a tab, or
+// off screen while pi works. One session has exactly one chat.
+function findChat(id: number): Chat | undefined {
+  for (const c of [...screens.values(), ...bound.values(), ...away]) if (c.meta.id === id) return c;
+  return undefined;
+}
+
 // Shown only while `c` is on a panel's screen; a chat off screen is replayed
 // when a panel comes back to it.
 function toScreen(c: Chat, update: PanelUpdate) {
@@ -479,7 +486,7 @@ async function seen(c: Chat) {
 async function switchTo(p: chrome.runtime.Port, next: SessionMeta, { stopLeft = false } = {}) {
   const left = screens.get(p);
   const tabId = portTab.get(p) ?? GLOBAL;
-  const back = isDraft(next) ? undefined : [...away].find((c) => c.meta.id === next.id);
+  const back = isDraft(next) ? undefined : findChat(next.id);
   if (back) away.delete(back);
   const shown = back ?? opened(next);
   // A shared chat (a scheduled run's, or one from before per-tab panels)
@@ -593,10 +600,8 @@ export const runJob = inOrder(async (run: Scheduled) => {
     if (![...screens.values()].some((c) => c.meta.id === chatId)) meta.unread = true;
     await store.putSession(meta);
   }
-  const chatId = meta.id;
-  const shown = [...screens.values()].find((c) => c.meta.id === chatId);
-  const c = shown ?? [...away].find((a) => a.meta.id === chatId) ?? opened(meta);
-  if (!shown) {
+  const c = findChat(meta.id) ?? opened(meta);
+  if (!onScreen(c)) {
     away.add(c);
     c.meta.updatedAt = now;
     c.meta.unread = true;

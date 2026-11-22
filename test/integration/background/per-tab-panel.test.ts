@@ -119,6 +119,21 @@ test("a restarted worker replays the chat the tab had open", async () => {
   expect(last("replay", reopened)?.session.id).toBe(chat.id);
 });
 
+test("a check-back for a closed panel's chat runs on the same chat, not a duplicate", async () => {
+  const port = await attach(10);
+  await pi.prompt(port.port, "hello");
+  const [chat] = await store.listSessions();
+  const bridge = chromeFake.nativePorts.at(-1)!;
+  port.close();
+
+  await pi.runJob({ kind: "check_back", id: "cb", chatId: chat.id, note: "again", next: 0 });
+  // The prompt went to the chat's own bridge; no second chat or bridge.
+  expect(bridge.sent).toContainEqual(expect.objectContaining({ type: "prompt" }));
+  expect(chromeFake.nativePorts).toHaveLength(1);
+  const reopened = await attach(10);
+  expect(last("replay", reopened)?.session.id).toBe(chat.id);
+});
+
 test("a chat not bound to a tab (a scheduled run's) is listed on every panel and binds to the tab that opens it", async () => {
   const shared = await store.addSession({ title: "job run", createdAt: 1, updatedAt: 1 });
   const port = await attach(10);

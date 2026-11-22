@@ -220,6 +220,30 @@ describe("background pi session", () => {
     await sending;
   });
 
+  test("a chat stored before the agent setting still runs pi after switching to opencode", async () => {
+    // Stored chats with a piSessionFile are pi chats even with no agent on them.
+    const meta = await store.addSession({ title: "Old chat", piSessionFile: SESSION_FILE, createdAt: 1, updatedAt: 1 });
+    chromeFake.storage.set("settings", { agent: "opencode" });
+    await pi.switchSession(meta.id);
+    expect(bridge().sent[0]).toMatchObject({ type: "start", agent: "pi", sessionFile: SESSION_FILE });
+  });
+
+  test("an ocSessionId the bridge reports while the first message is being stored is kept", async () => {
+    chromeFake.storage.set("settings", { agent: "opencode" });
+    // oxlint-disable-next-line typescript/unbound-method -- called below with the store as `this`
+    const { add } = IDBObjectStore.prototype;
+    IDBObjectStore.prototype.add = function (...args) {
+      fromBridge({ type: "ready", ocSessionId: "ses_1", history: HISTORY, model: { models: [] }, commands: [] });
+      return add.apply(this, args);
+    };
+    try {
+      await pi.prompt("hello");
+    } finally {
+      IDBObjectStore.prototype.add = add;
+    }
+    await waitFor(async () => expect((await store.listSessions())[0].ocSessionId).toBe("ses_1"));
+  });
+
   test("switching back to a stored chat starts pi on its session file", async () => {
     const chat = await storedChat();
     await pi.newSession();

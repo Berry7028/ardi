@@ -134,10 +134,13 @@ function partChunks(part: Record<string, unknown>, state: OcNormState): ChatChun
   if (role === "user") {
     if (type === "file") {
       const image = imageOf(part);
-      if (image && !state.userShown.has(messageID)) {
+      if (!image) return [];
+      if (!state.userShown.has(messageID)) {
         state.userFiles.set(messageID, [...(state.userFiles.get(messageID) ?? []), image]);
+        return [];
       }
-      return [];
+      // The text went out already; the image gets a bubble of its own.
+      return [{ type: "user", text: "", at: Date.now(), images: [image] }];
     }
     if (type === "text") {
       if (state.userShown.has(messageID)) return [];

@@ -56,6 +56,21 @@ describe("normalizeOcEvent", () => {
     ).toEqual([{ type: "user", text: "look", at: expect.any(Number), images: [{ data: "QUJD", mimeType: "image/png" }] }]);
   });
 
+  test("a user file part that arrives after the text still shows", () => {
+    // sendPrompt posts text first, then files: images can't be dropped once
+    // the text's chunk went out.
+    expect(
+      feed(
+        info("m1", "user"),
+        part({ type: "text", text: "look" }),
+        part({ type: "file", mime: "image/png", url: "data:image/png;base64,QUJD" }),
+      ),
+    ).toEqual([
+      { type: "user", text: "look", at: expect.any(Number) },
+      { type: "user", text: "", at: expect.any(Number), images: [{ data: "QUJD", mimeType: "image/png" }] },
+    ]);
+  });
+
   test("assistant text streams by suffix diff", () => {
     const state = createOcNormState();
     normalizeOcEvent(info("m1", "assistant"), state);

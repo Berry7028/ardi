@@ -15,12 +15,15 @@ import { setTarget } from "../../../src/background/target";
 type Background = typeof import("../../../src/background/pi-session");
 
 let pi: Background;
+let panel: FakePort;
 let copies = 0;
 
 beforeEach(async () => {
   setTarget({ nativeHost: "com.ardi.test" });
   for (const chat of await store.listSessions()) await store.deleteSession(chat.id);
   pi = (await import(`../../../src/background/pi-session.ts?schedules=${copies++}`)) as Background;
+  panel = new FakePort("panel");
+  await pi.attachPanel(panel.port);
   await schedules.noteBrowserStart();
 });
 
@@ -43,7 +46,7 @@ async function fire(id: string, scheduledTime?: number) {
 
 // A stored chat with pi done with its first message, and its bridge.
 async function storedChat(text = "watch the deploy") {
-  await pi.prompt(text);
+  await pi.prompt(panel.port, text);
   const port = bridge();
   fromBridge({ type: "ready", sessionFile: `/sessions/${text}.jsonl`, history: [], model: MODEL, commands: [] });
   await waitFor(async () => expect((await store.listSessions())[0]?.piSessionFile).toBe(`/sessions/${text}.jsonl`));
@@ -93,7 +96,7 @@ describe("scheduled jobs", () => {
     expect(sessions.sessions[0]).toMatchObject({ title: "Digest", unread: true });
     expect(sessions.currentId).not.toBe(sessions.sessions[0].id);
 
-    await pi.switchSession(sessions.sessions[0].id);
+    await pi.switchSession(panel.port, sessions.sessions[0].id);
     expect((await store.listSessions())[0].unread).toBeFalsy();
   });
 
@@ -204,7 +207,7 @@ describe("pi's check_back tool", () => {
     await checkBack("is it done?", port, Date.now() + 60_000);
     // Still working when the user moves on, so its bridge stays up off screen.
     fromBridge({ type: "busy", busy: true, requests: received(port) }, port);
-    await pi.newSession();
+    await pi.newSession(panel.port);
     // It reports idle while the check-back is being stored.
     const put = store.putSession;
     const spy = spyOn(store, "putSession").mockImplementation(async (m) => {
@@ -217,7 +220,7 @@ describe("pi's check_back tool", () => {
       spy.mockRestore();
     }
     const ports = chromeFake.nativePorts.length;
-    await pi.switchSession(meta.id);
+    await pi.switchSession(panel.port, meta.id);
     expect(chromeFake.nativePorts).toHaveLength(ports);
     expect(bridge().sent.at(-1)).toMatchObject({ type: "prompt", text: "[Check-back] is it done?" });
   });
@@ -226,7 +229,7 @@ describe("pi's check_back tool", () => {
     const { meta, port } = await storedChat();
     await checkBack("is the deploy done?", port, Date.now() + 60_000);
     idle(port);
-    await pi.newSession();
+    await pi.newSession(panel.port);
     await waitFor(() => expect(port.disconnected).toBe(true));
 
     await fire(armed()[0]);
@@ -239,11 +242,11 @@ describe("pi's check_back tool", () => {
   test("Stop leaves the model's check-back; deleting the chat drops it", async () => {
     const first = await storedChat("one");
     await checkBack("a", first.port);
-    pi.abort();
+    pi.abort(panel.port);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(armed()).toHaveLength(1);
 
-    await pi.deleteSession(first.meta.id);
+    await pi.deleteSession(panel.port, first.meta.id);
     await waitFor(() => expect(armed()).toEqual([]));
   });
 });

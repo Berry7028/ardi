@@ -19,6 +19,10 @@ export interface BackgroundTarget {
   // The browser shows the extension tabs the user can't mean (Ardia: other
   // profiles' and unloaded ones), so the @ menu asks the bridge which to list.
   narrowsTabs?: boolean;
+  // The side panel opens per tab, each with the chat bound to that tab, and
+  // closes when the active tab has none. Unset: one panel shared by every
+  // tab and window.
+  panelPerTab?: boolean;
   connectBrowser?(reply: (reply: BrowserReply) => void): BrowserLink;
 }
 

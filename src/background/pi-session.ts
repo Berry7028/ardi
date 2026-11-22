@@ -19,6 +19,13 @@ import { target, type BrowserLink } from "./target";
 // pi's session file is the record of the conversation: on start the bridge
 // returns its history, and `live` holds what happened since. Only the chat
 // list is stored here (IndexedDB).
+//
+// A chat belongs to a browser tab: the Chrome build opens a side panel per
+// tab, each showing that tab's chat (`bound` maps tab id to its chat).
+// Targets without per-tab panels share one chat across every panel, keyed
+// under GLOBAL. Chats with no `tabId` (scheduled runs, chats from before
+// per-tab panels) appear in every panel's list and bind to the tab that
+// opens them.
 const TITLE_LEN = 60;
 
 // Messages sent to a bridge that pi hasn't answered yet, with the browser
@@ -63,8 +70,17 @@ type Chat = {
   connection: Connection;
 };
 
-// The chat on screen.
-let chat: Chat;
+// The key under which targets without per-tab panels keep their one chat.
+const GLOBAL = -1;
+// The chat each panel shows, by its port.
+const screens = new Map<chrome.runtime.Port, Chat>();
+// The tab a panel's port belongs to: GLOBAL on targets without per-tab panels.
+const portTab = new Map<chrome.runtime.Port, number>();
+// The window a panel's port lives in, on per-tab targets only.
+const portWindow = new Map<chrome.runtime.Port, number>();
+// Tab id -> the chat its panel shows (GLOBAL for the shared chat). Keeps the
+// chat while its panel is closed so switching back to the tab replays it.
+const bound = new Map<number, Chat>();
 // Chats off screen that pi still works on. Leaving an idle chat stops its pi;
 // a chat that finishes off screen stops it then.
 const away = new Set<Chat>();
@@ -84,9 +100,9 @@ const panels = new Set<chrome.runtime.Port>();
 // and joins the chat list. Drafts have id 0 (IndexedDB ids start at 1).
 const DRAFT_ID = 0;
 
-function draft(): SessionMeta {
+function draft(tabId?: number): SessionMeta {
   const now = Date.now();
-  return { id: DRAFT_ID, title: "", createdAt: now, updatedAt: now };
+  return { id: DRAFT_ID, title: "", createdAt: now, updatedAt: now, ...(tabId !== undefined && tabId !== GLOBAL ? { tabId } : {}) };
 }
 
 function isDraft(meta: SessionMeta): boolean {
@@ -99,21 +115,61 @@ function opened(meta: SessionMeta): Chat {
   };
 }
 
-// The chat that's open, in chrome.storage.local, so a restarted worker
-// (browser restart, extension reload) comes back to it, even to a new chat
-// that is still a draft. Without one: the most recent chat, or a new one.
+// The chat on screen for shared panels, in chrome.storage.local, so a
+// restarted worker comes back to it. Per tab the same lives in CURRENT_TABS.
 const CURRENT_CHAT = "currentChat";
+// Per tab, which of its chats is open, so a restarted worker replays it.
+const CURRENT_TABS = "currentTabs";
+
+// The chat a tab already has: bound, the one it had open before a worker
+// restart, or its latest stored one; undefined when it never had one.
+async function lookupTab(tabId: number): Promise<Chat | undefined> {
+  const existing = bound.get(tabId);
+  if (existing) return existing;
+  const { [CURRENT_TABS]: currents = {} } = await chrome.storage.local.get(CURRENT_TABS);
+  const id = (currents as Record<string, number>)[tabId];
+  const saved = typeof id === "number" && id !== DRAFT_ID ? await store.getSession(id) : undefined;
+  const meta = id === DRAFT_ID ? draft(tabId) : saved ?? (await store.listSessions()).find((s) => s.tabId === tabId);
+  if (!meta) return undefined;
+  const chat = opened(meta);
+  bindTab(tabId, chat);
+  return chat;
+}
+
+// A tab's chat: the one it has, else a fresh draft bound to it.
+async function chatForTab(tabId: number): Promise<Chat> {
+  const existing = await lookupTab(tabId);
+  if (existing) return existing;
+  const chat = opened(draft(tabId));
+  bindTab(tabId, chat);
+  return chat;
+}
+
+function bindTab(tabId: number, c: Chat) {
+  bound.set(tabId, c);
+  void (async () => {
+    const { [CURRENT_TABS]: currents = {} } = await chrome.storage.local.get(CURRENT_TABS);
+    await chrome.storage.local.set({ [CURRENT_TABS]: { ...(currents as Record<string, number>), [tabId]: c.meta.id } });
+  })();
+}
 
 const ready: Promise<void> = (async () => {
   const { [CURRENT_CHAT]: id } = await chrome.storage.local.get(CURRENT_CHAT);
   const saved = typeof id === "number" && id !== DRAFT_ID ? await store.getSession(id) : undefined;
-  chat = opened(id === DRAFT_ID ? draft() : (saved ?? (await store.listSessions())[0] ?? draft()));
+  bound.set(GLOBAL, opened(id === DRAFT_ID ? draft() : (saved ?? (await store.listSessions())[0] ?? draft())));
 })();
 
 // Keeps chat `c`, under new metadata (it was stored, or got its file).
 function setMeta(c: Chat, meta: SessionMeta) {
   c.meta = meta;
-  if (c === chat) void chrome.storage.local.set({ [CURRENT_CHAT]: meta.id });
+  for (const [t, shown] of bound) {
+    if (shown !== c) continue;
+    if (t === GLOBAL) void chrome.storage.local.set({ [CURRENT_CHAT]: meta.id });
+    else void (async () => {
+      const { [CURRENT_TABS]: currents = {} } = await chrome.storage.local.get(CURRENT_TABS);
+      await chrome.storage.local.set({ [CURRENT_TABS]: { ...(currents as Record<string, number>), [t]: meta.id } });
+    })();
+  }
 }
 
 // `c`'s bridge while it's open.
@@ -132,23 +188,45 @@ function setConnection(c: Chat, next: Connection) {
   toScreen(c, { kind: "status", status: status(c) });
 }
 
-function broadcast(update: PanelUpdate) {
-  for (const p of panels) postInParts(p, update);
+// Whether any panel shows `c`.
+function onScreen(c: Chat): boolean {
+  for (const shown of screens.values()) if (shown === c) return true;
+  return false;
 }
 
-// Shown only while `c` is on screen; a chat off screen is replayed when the
-// user comes back.
+// The live chat object with session `id`: on a screen, bound to a tab, or
+// off screen while pi works. One session has exactly one chat.
+function findChat(id: number): Chat | undefined {
+  for (const c of [...screens.values(), ...bound.values(), ...away]) if (c.meta.id === id) return c;
+  return undefined;
+}
+
+// Shown only while `c` is on a panel's screen; a chat off screen is replayed
+// when a panel comes back to it.
 function toScreen(c: Chat, update: PanelUpdate) {
-  if (c === chat) broadcast(update);
+  for (const [p, shown] of screens) if (shown === c) postInParts(p, update);
 }
 
-async function sessionsUpdate(): Promise<PanelUpdate> {
-  const running = [chat, ...away].filter((c) => live(c)?.running && !isDraft(c.meta)).map((c) => c.meta.id);
-  return { kind: "sessions", sessions: await store.listSessions(), currentId: chat.meta.id, running };
+async function sessionsUpdateFor(tabId: number): Promise<PanelUpdate> {
+  const all = await store.listSessions();
+  const sessions = tabId === GLOBAL ? all : all.filter((s) => s.tabId === tabId || s.tabId === undefined);
+  const ids = new Set(sessions.map((s) => s.id));
+  const chats = new Set([...bound.values(), ...away]);
+  const running = [...chats].filter((c) => live(c)?.running && !isDraft(c.meta) && ids.has(c.meta.id)).map((c) => c.meta.id);
+  return { kind: "sessions", sessions, currentId: bound.get(tabId)?.meta.id ?? DRAFT_ID, running };
 }
 
 async function broadcastSessions() {
-  broadcast(await sessionsUpdate());
+  for (const p of panels) {
+    const update = await sessionsUpdateFor(portTab.get(p) ?? GLOBAL);
+    // The panel may have closed while its update was read.
+    if (!panels.has(p)) continue;
+    try {
+      postInParts(p, update);
+    } catch {
+      // Posting to a port that just went away.
+    }
+  }
 }
 
 function pushLive(c: Chat, chunk: ChatChunk) {
@@ -156,8 +234,8 @@ function pushLive(c: Chat, chunk: ChatChunk) {
   toScreen(c, { kind: "live", chunk });
 }
 
-function replay(): PanelUpdate {
-  return { kind: "replay", status: status(chat), session: chat.meta, history: chat.history, live: chat.live, queue: live(chat)?.queue ?? [], model: chat.model, commands: chat.commands };
+function replay(c: Chat): PanelUpdate {
+  return { kind: "replay", status: status(c), session: c.meta, history: c.history, live: c.live, queue: live(c)?.queue ?? [], model: c.model, commands: c.commands };
 }
 
 // `c`'s bridge has work left. Only the bridge knows what it has in hand (a
@@ -170,7 +248,7 @@ function busy(c: Chat): boolean {
 
 // A chat off screen that pi is done with stops its pi and is dropped.
 function settle(c: Chat) {
-  if (c === chat || busy(c)) return;
+  if (onScreen(c) || busy(c)) return;
   stop(c);
   away.delete(c);
 }
@@ -195,13 +273,13 @@ function closeConnection(c: Chat, unanswered: "hand back" | "drop"): Promise<voi
   return disposed;
 }
 
-// To the message box of the open panels if `c` is on screen; else held
-// for `c` until a panel shows it.
+// To the message box of the panels showing `c`; else held for `c` until a
+// panel shows it.
 let holding: Promise<void> = Promise.resolve();
 function giveBack(c: Chat, messages: Returned) {
   if (!messages.length) return;
   const restore = restoreOf(messages);
-  if (c === chat && panels.size && restore) return broadcast({ kind: "restore", ...restore });
+  if (onScreen(c) && restore) return toScreen(c, { kind: "restore", ...restore });
   const id = c.meta.id;
   holding = holding.then(async () => {
     const { [HELD]: held = {} } = await chrome.storage.local.get(HELD);
@@ -210,19 +288,24 @@ function giveBack(c: Chat, messages: Returned) {
   });
 }
 
-// Hands what's held for the chat on screen to panel `to`, or to every open
-// panel. It's handed over before it's cleared from storage, while that chat is
-// known to be on screen, and stays held if no panel took it.
+// Hands what's held for each panel's chat to that panel (or `to` only). It's
+// handed over before it's cleared from storage, while that chat is known to
+// be on screen, and stays held if no panel took it.
 function handOver(to?: chrome.runtime.Port): Promise<void> {
   holding = holding
     .then(async () => {
       const { [HELD]: held = {} } = await chrome.storage.local.get(HELD);
-      const { [chat.meta.id]: mine, ...rest } = held as Held;
-      const restore = mine && restoreOf(mine);
+      const all = { ...(held as Held) };
       const ports = to ? [to].filter((p) => panels.has(p)) : [...panels];
-      if (!restore || !ports.length) return;
-      for (const p of ports) postInParts(p, { kind: "restore", ...restore });
-      await chrome.storage.local.set({ [HELD]: rest });
+      for (const p of ports) {
+        const c = screens.get(p);
+        const mine = c && all[c.meta.id];
+        const restore = mine && restoreOf(mine);
+        if (!restore) continue;
+        postInParts(p, { kind: "restore", ...restore });
+        delete all[c.meta.id];
+      }
+      await chrome.storage.local.set({ [HELD]: all });
     })
     .catch(() => undefined);
   return holding;
@@ -239,7 +322,7 @@ function dropHeld(id: number) {
     .catch(() => undefined);
 }
 
-// `c` is unset only before the worker has read which chat is open.
+// `c` is unset only before the worker has read which chats are open.
 function post(c: Chat | undefined, request: BridgeRequest) {
   const conn = c && live(c);
   if (!conn) return;
@@ -275,7 +358,7 @@ async function onBridgeEvent(c: Chat, conn: Live, event: Exclude<BridgeEvent, { 
       c.model = lastModel = event.model;
       c.commands = lastCommands = event.commands;
       conn.state = "connected";
-      toScreen(c, replay());
+      toScreen(c, replay(c));
       break;
     }
     case "busy":
@@ -287,7 +370,7 @@ async function onBridgeEvent(c: Chat, conn: Live, event: Exclude<BridgeEvent, { 
       // Only until pi's own `ready`.
       if (c.history) break;
       c.history = event.history;
-      toScreen(c, replay());
+      toScreen(c, replay(c));
       break;
     case "model":
       c.model = lastModel = event.model;
@@ -338,12 +421,6 @@ function startChat(c: Chat): Promise<void> {
   return starting.started;
 }
 
-// Starts pi for the chat on screen.
-export async function start(): Promise<void> {
-  await ready;
-  await startChat(chat);
-}
-
 async function connect(c: Chat, starting: Connection) {
   const { piPath } = await loadSettings();
   // Restarted, stopped or left while settings were read.
@@ -374,7 +451,7 @@ async function connect(c: Chat, starting: Connection) {
   post(c, { type: "start", sessionFile: c.meta.piSessionFile, piPath: piPath || undefined });
 }
 
-// What the panel and settings ask for runs one request at a time, in the
+// What the panels and settings ask for runs one request at a time, in the
 // order asked: a message still being stored must not land in a chat the user
 // switched to meanwhile, nor be passed by a new chat. Stop and restart don't
 // wait: a message being stored when pi restarts goes to the new pi.
@@ -388,13 +465,14 @@ function inOrder<A extends unknown[]>(run: (...args: A) => unknown): (...args: A
   };
 }
 
-// Restarts the chat on screen's pi; pi resumes the same session. Also
-// applies changed settings.
-export async function restart() {
-  await ready;
-  const c = chat;
-  await closeConnection(c, "hand back");
-  await startChat(c);
+// Puts `c` on `p`'s screen: replayed, its session list sent, held messages
+// handed over.
+async function show(p: chrome.runtime.Port, c: Chat) {
+  screens.set(p, c);
+  if (c.meta.unread) await seen(c);
+  postInParts(p, replay(c));
+  postInParts(p, await sessionsUpdateFor(portTab.get(p) ?? GLOBAL));
+  await handOver(p);
 }
 
 // A panel shows `c`: what a scheduled run did there is no longer unread.
@@ -403,36 +481,69 @@ async function seen(c: Chat) {
   await store.putSession(c.meta);
 }
 
-// Puts `next` on screen: back to its chat if pi still works on it, else a
-// fresh pi on its session. The chat left keeps its pi only while it's busy.
-async function switchTo(next: SessionMeta, { stopLeft = false } = {}) {
-  const left = chat;
-  const back = isDraft(next) ? undefined : [...away].find((c) => c.meta.id === next.id);
+// Puts `next` on `p`'s screen: back to its chat if pi still works on it, else
+// a fresh pi on its session. The chat left keeps its pi only while it's busy.
+async function switchTo(p: chrome.runtime.Port, next: SessionMeta, { stopLeft = false } = {}) {
+  const left = screens.get(p);
+  const tabId = portTab.get(p) ?? GLOBAL;
+  const back = isDraft(next) ? undefined : findChat(next.id);
   if (back) away.delete(back);
-  chat = back ?? opened(next);
-  void chrome.storage.local.set({ [CURRENT_CHAT]: next.id });
-  broadcast(replay());
-  if (stopLeft) stop(left);
-  if (busy(left)) away.add(left);
-  else stop(left);
+  const shown = back ?? opened(next);
+  // A shared chat (a scheduled run's, or one from before per-tab panels)
+  // picked up here becomes this tab's.
+  if (tabId !== GLOBAL && shown.meta.tabId !== tabId) {
+    shown.meta.tabId = tabId;
+    if (!isDraft(shown.meta)) await store.putSession(shown.meta);
+  }
+  if (tabId === GLOBAL) {
+    // One chat, shared by every panel: they all replay it.
+    bound.set(GLOBAL, shown);
+    for (const p2 of panels) {
+      screens.set(p2, shown);
+      postInParts(p2, replay(shown));
+    }
+    void chrome.storage.local.set({ [CURRENT_CHAT]: next.id });
+  } else {
+    // A chat can't be on two screens: a panel that had it goes back to its
+    // own tab's chat (or a draft if that was it).
+    for (const [other, c] of screens) {
+      if (other === p || c !== shown) continue;
+      const t = portTab.get(other) ?? GLOBAL;
+      let own = bound.get(t);
+      if (!own || own === shown) {
+        own = opened(draft(t));
+        bindTab(t, own);
+      }
+      screens.set(other, own);
+      postInParts(other, replay(own));
+    }
+    bindTab(tabId, shown);
+    screens.set(p, shown);
+    postInParts(p, replay(shown));
+  }
+  if (left) {
+    if (stopLeft) stop(left);
+    if (busy(left)) away.add(left);
+    else stop(left);
+  }
   void handOver();
-  if (chat.meta.unread) await seen(chat);
+  if (shown.meta.unread) await seen(shown);
   await broadcastSessions();
-  await startChat(chat);
+  await startChat(shown);
 }
 
-export const newSession = inOrder(async () => {
+export const newSession = inOrder(async (p: chrome.runtime.Port) => {
   await ready;
-  if (!isDraft(chat.meta)) await switchTo(draft());
+  if (!isDraft(screens.get(p)?.meta ?? draft())) await switchTo(p, draft(portTab.get(p) ?? GLOBAL));
 });
 
-export const switchSession = inOrder(async (id: number) => {
+export const switchSession = inOrder(async (p: chrome.runtime.Port, id: number) => {
   await ready;
   const meta = await store.getSession(id);
-  if (meta && meta.id !== chat.meta.id) await switchTo(meta);
+  if (meta && meta.id !== screens.get(p)?.meta.id) await switchTo(p, meta);
 });
 
-export const deleteSession = inOrder(async (id: number) => {
+export const deleteSession = inOrder(async (_p: chrome.runtime.Port, id: number) => {
   await ready;
   await store.deleteSession(id);
   dropHeld(id);
@@ -442,15 +553,31 @@ export const deleteSession = inOrder(async (id: number) => {
     stop(c);
     away.delete(c);
   }
-  if (id !== chat.meta.id) return broadcastSessions();
-  const [latest] = await store.listSessions();
-  await switchTo(latest ?? draft(), { stopLeft: true });
+  const gone: number[] = [];
+  for (const [t, c] of bound) if (c.meta.id === id) { bound.delete(t); gone.push(t); }
+  if (gone.length) {
+    const { [CURRENT_TABS]: currents = {} } = await chrome.storage.local.get(CURRENT_TABS);
+    const rest = { ...(currents as Record<string, number>) };
+    for (const t of gone) delete rest[t];
+    await chrome.storage.local.set({ [CURRENT_TABS]: rest });
+  }
+  let switched = false;
+  for (const [p2, c] of Array.from(screens)) {
+    if (c.meta.id !== id) continue;
+    const t = portTab.get(p2) ?? GLOBAL;
+    const all = await store.listSessions();
+    const sessions = t === GLOBAL ? all : all.filter((s) => s.tabId === t || s.tabId === undefined);
+    await switchTo(p2, sessions[0] ?? draft(t), { stopLeft: true });
+    switched = true;
+  }
+  if (!switched) await broadcastSessions();
 });
 
-export const prompt = inOrder(async (text: string, images?: ImageAttachment[], steer?: boolean) => {
+export const prompt = inOrder(async (p: chrome.runtime.Port, text: string, images?: ImageAttachment[], steer?: boolean) => {
   await ready;
+  const c = screens.get(p);
   // The chat it was sent from, even if the user moves on meanwhile.
-  await send(chat, text, images, steer);
+  if (c) await send(c, text, images, steer);
 });
 
 // Runs what came due: a check-back prompts its chat; a job, a new chat named
@@ -469,11 +596,12 @@ export const runJob = inOrder(async (run: Scheduled) => {
     // The chat was deleted.
     if (!meta) return;
     meta.updatedAt = now;
-    if (meta.id !== chat.meta.id) meta.unread = true;
+    const chatId = meta.id;
+    if (![...screens.values()].some((c) => c.meta.id === chatId)) meta.unread = true;
     await store.putSession(meta);
   }
-  const c = meta.id === chat.meta.id ? chat : ([...away].find((a) => a.meta.id === meta.id) ?? opened(meta));
-  if (c !== chat) {
+  const c = findChat(meta.id) ?? opened(meta);
+  if (!onScreen(c)) {
     away.add(c);
     c.meta.updatedAt = now;
     c.meta.unread = true;
@@ -531,34 +659,151 @@ function deliver(conn: Live, text: string, images: ImageAttachment[] | undefined
   postInParts(conn.port, request);
 }
 
-export function queueAction({ action, index, text }: QueueAction) {
-  post(chat, { type: "queue_action", action, index, text });
+export function queueAction(p: chrome.runtime.Port, { action, index, text }: QueueAction) {
+  post(screens.get(p), { type: "queue_action", action, index, text });
 }
 
-export function abort() {
-  if (chat) live(chat)?.browser?.cancel();
-  post(chat, { type: "abort" });
+export function abort(p: chrome.runtime.Port) {
+  const c = screens.get(p);
+  if (c) live(c)?.browser?.cancel();
+  post(c, { type: "abort" });
 }
 
-export const compact = inOrder(() => {
-  post(chat, { type: "compact" });
+// Starts pi for the chat `p` shows.
+export async function start(p: chrome.runtime.Port): Promise<void> {
+  await ready;
+  const c = screens.get(p);
+  if (c) await startChat(c);
+}
+
+// Restarts `p`'s chat's pi; pi resumes the same session.
+export async function restart(p: chrome.runtime.Port) {
+  await ready;
+  const c = screens.get(p);
+  if (!c) return;
+  await closeConnection(c, "hand back");
+  await startChat(c);
+}
+
+// Restarts every chat's pi: settings changed.
+export async function restartAll() {
+  await ready;
+  for (const c of new Set([...screens.values(), ...bound.values(), ...away])) {
+    // Never-started chats that nobody's looking at come up lazily instead.
+    if (c.connection.state === "down" && !onScreen(c)) continue;
+    await closeConnection(c, "hand back");
+    await startChat(c);
+  }
+}
+
+export const compact = inOrder((p: chrome.runtime.Port) => {
+  post(screens.get(p), { type: "compact" });
 });
 
-export const setModel = inOrder((provider: string, modelId: string) => {
-  post(chat, { type: "set_model", provider, modelId });
+export const setModel = inOrder((p: chrome.runtime.Port, provider: string, modelId: string) => {
+  post(screens.get(p), { type: "set_model", provider, modelId });
 });
 
-export const setThinkingLevel = inOrder((level: ThinkingLevel) => {
-  post(chat, { type: "set_thinking_level", level });
+export const setThinkingLevel = inOrder((p: chrome.runtime.Port, level: ThinkingLevel) => {
+  post(screens.get(p), { type: "set_thinking_level", level });
 });
 
+// A panel connected. On shared-panel targets it attaches to the shared chat
+// at once; on per-tab targets it waits for the panel's `attach` with its
+// window, since a port doesn't say which tab it opened for.
 export async function attachPanel(p: chrome.runtime.Port) {
   panels.add(p);
-  p.onDisconnect.addListener(() => panels.delete(p));
+  p.onDisconnect.addListener(() => {
+    panels.delete(p);
+    screens.delete(p);
+    portTab.delete(p);
+    portWindow.delete(p);
+  });
+  if (target().panelPerTab) return;
   await ready;
-  // Only waits when there's something to clear, so a panel's replay isn't held up.
-  if (chat.meta.unread) await seen(chat);
-  postInParts(p, replay());
-  postInParts(p, await sessionsUpdate());
-  await handOver(p);
+  portTab.set(p, GLOBAL);
+  await show(p, bound.get(GLOBAL)!);
 }
+
+// `attach` from a tab-scoped panel, with the window it opened in: binds the
+// port to the window's active tab and shows that tab's chat.
+export const bindPanel = inOrder(async (p: chrome.runtime.Port, windowId: number) => {
+  if (!target().panelPerTab) return;
+  await ready;
+  portWindow.set(p, windowId);
+  const [active] = await chrome.tabs.query({ active: true, windowId });
+  const tabId = active?.id ?? GLOBAL;
+  portTab.set(p, tabId);
+  const chat = await chatForTab(tabId);
+  await show(p, chat);
+  // Like a shared panel connecting: the tab's chat comes up with its panel.
+  await startChat(chat);
+});
+
+// The toolbar icon on a tab (per-tab targets): open that tab's chat's panel,
+// on that tab only.
+export const openForTab = inOrder(async (tabId: number) => {
+  if (!target().panelPerTab) return;
+  // Opening needs the icon click's user gesture, spent if we dawdle first.
+  const path = chrome.runtime.getManifest().side_panel?.default_path ?? "src/sidepanel/index.html";
+  await chrome.sidePanel.setOptions({ tabId, path, enabled: true });
+  await chrome.sidePanel.open({ tabId });
+  await ready;
+  await chatForTab(tabId);
+});
+
+// A tab becoming active swaps its window's panel to that tab's chat, or
+// drops the panel from the tab if the tab has no chat of its own.
+export const tabActivated = inOrder(async (windowId: number, tabId: number) => {
+  await ready;
+  const next = await lookupTab(tabId);
+  for (const [p, w] of portWindow) {
+    if (w !== windowId) continue;
+    if (!next) {
+      screens.delete(p);
+      portTab.delete(p);
+      // The panel closes itself once the tab stops allowing it.
+      void chrome.sidePanel.setOptions({ tabId, enabled: false });
+      continue;
+    }
+    const left = screens.get(p);
+    portTab.set(p, tabId);
+    if (left === next) continue;
+    await show(p, next);
+    if (left) {
+      if (busy(left)) away.add(left);
+      else stop(left);
+    }
+    await startChat(next);
+  }
+});
+
+// A tab closing ends its chats: their pis stop and their entries are dropped.
+export const tabClosed = inOrder(async (tabId: number) => {
+  await ready;
+  const c = bound.get(tabId);
+  if (c) stop(c);
+  bound.delete(tabId);
+  for (const [p, t] of portTab) {
+    if (t !== tabId) continue;
+    screens.delete(p);
+    portTab.delete(p);
+    portWindow.delete(p);
+  }
+  for (const meta of await store.listSessions()) {
+    if (meta.tabId !== tabId) continue;
+    await store.deleteSession(meta.id);
+    dropHeld(meta.id);
+    await schedules.dropCheckBack(meta.id);
+  }
+  for (const a of Array.from(away)) {
+    if (a.meta.tabId !== tabId) continue;
+    stop(a);
+    away.delete(a);
+  }
+  const { [CURRENT_TABS]: currents = {} } = await chrome.storage.local.get(CURRENT_TABS);
+  const rest = { ...(currents as Record<string, number>) };
+  delete rest[tabId];
+  await chrome.storage.local.set({ [CURRENT_TABS]: rest });
+  await broadcastSessions();
+});

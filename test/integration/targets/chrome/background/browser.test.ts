@@ -15,44 +15,47 @@ import { connectBrowser } from "../../../../../src/targets/chrome/background/bro
 type Background = typeof import("../../../../../src/background/pi-session");
 
 let pi: Background;
+let panel: FakePort;
 let copies = 0;
 
 beforeEach(async () => {
   setTarget({ nativeHost: "com.ardi.chrome.test", connectBrowser });
   for (const chat of await store.listSessions()) await store.deleteSession(chat.id);
   pi = (await import(`../../../../../src/background/pi-session.ts?chrome=${copies++}`)) as Background;
+  panel = new FakePort("panel");
+  await pi.attachPanel(panel.port);
 });
 
 const bridge = () => chromeFake.nativePorts.at(-1)!;
 const fromBridge = (event: BridgeEvent) => bridge().receive(event);
 
 test("browser requests execute in this extension and replies return to their originating native port", async () => {
-  await pi.start();
+  await pi.start(panel.port);
   chromeFake.tabs = [{ id: 7, title: "Here", url: "https://here.test/", active: true, windowId: 1 }];
   fromBridge({ type: "browser_request", id: "r1", request: { op: "list" } });
   await waitFor(() => expect(bridge().sent).toContainEqual({ type: "browser_reply", id: "r1", result: [{ id: "7", title: "Here", url: "https://here.test/", current: true }] }));
   fromBridge({ type: "browser_request", id: "r2", request: { op: "eval", id: "999", code: "1" } });
   await waitFor(() => expect(bridge().sent).toContainEqual({ type: "browser_reply", id: "r2", error: expect.stringContaining("No tab") }));
   const old = bridge();
-  await pi.restart();
+  await pi.restart(panel.port);
   old.receive({ type: "browser_request", id: "stale", request: { op: "list" } });
   await Promise.resolve();
   expect(bridge().sent.some(e => e.id === "stale")).toBe(false);
 });
 
 test("Stop blocks browser work immediately and a new prompt cannot revive queued work", async () => {
-  await pi.start();
+  await pi.start(panel.port);
   chromeFake.tabs = [{ id: 7, title: "Here", url: "https://here.test/", active: true, windowId: 1 }];
   const originalGet = chrome.tabs.get;
   let resolve!: (tab: chrome.tabs.Tab) => void;
   chrome.tabs.get = () => new Promise<chrome.tabs.Tab>(done => { resolve = done; });
   try {
     fromBridge({ type: "browser_request", id: "queued", request: { op: "cdp", id: "7", method: "Input.insertText", params: { text: "stale" } } });
-    pi.abort();
+    pi.abort(panel.port);
     // No browser_cancel event from the relay: Stop itself must stop work.
     fromBridge({ type: "browser_request", id: "after-stop", request: { op: "open", url: "https://new.test/" } });
     await waitFor(() => expect(bridge().sent).toContainEqual({ type: "browser_reply", id: "after-stop", error: expect.stringContaining("canceled") }));
-    await pi.prompt("Continue now");
+    await pi.prompt(panel.port, "Continue now");
     const accepted = bridge().sent.findLast(e => e.type === "prompt")!;
     fromBridge({ type: "prompt_result", promptId: accepted.promptId, started: true });
     resolve({ ...chromeFake.tabs[0] } as chrome.tabs.Tab);
@@ -66,10 +69,10 @@ test("Stop blocks browser work immediately and a new prompt cannot revive queued
 });
 
 test("a rejected prompt does not lift banner cancellation", async () => {
-  await pi.start();
+  await pi.start(panel.port);
   chromeFake.tabs = [{ id: 7, title: "Here", url: "https://here.test/", active: true, windowId: 1 }];
   chromeFake.debuggerDetach.emit({ tabId: 7 }, "canceled_by_user");
-  await pi.prompt("Rejected while the old run is busy");
+  await pi.prompt(panel.port, "Rejected while the old run is busy");
   const prompt = bridge().sent.findLast(e => e.type === "prompt")!;
   fromBridge({ type: "prompt_result", promptId: prompt.promptId, started: false });
   fromBridge({ type: "browser_request", id: "rejected", request: { op: "cdp", id: "7", method: "Input.insertText", params: { text: "old run" } } });
@@ -78,14 +81,14 @@ test("a rejected prompt does not lift banner cancellation", async () => {
 });
 
 test("a second prompt cannot disconnect queued work from later banner cancellation", async () => {
-  await pi.start();
+  await pi.start(panel.port);
   chromeFake.tabs = [{ id: 7, title: "Here", url: "https://here.test/", active: true, windowId: 1 }];
   const originalGet = chrome.tabs.get;
   let resolve!: (tab: chrome.tabs.Tab) => void;
   chrome.tabs.get = () => new Promise<chrome.tabs.Tab>(done => { resolve = done; });
   try {
     fromBridge({ type: "browser_request", id: "queued-before-prompt", request: { op: "cdp", id: "7", method: "Input.insertText", params: { text: "stale" } } });
-    await pi.prompt("Another request");
+    await pi.prompt(panel.port, "Another request");
     const prompt = bridge().sent.findLast(e => e.type === "prompt")!;
     fromBridge({ type: "prompt_result", promptId: prompt.promptId, started: true });
     chromeFake.debuggerDetach.emit({ tabId: 7 }, "canceled_by_user");
@@ -96,11 +99,11 @@ test("a second prompt cannot disconnect queued work from later banner cancellati
 });
 
 test("a late prompt acceptance cannot lift a newer Stop", async () => {
-  await pi.start();
-  pi.abort();
-  await pi.prompt("Start a new run");
+  await pi.start(panel.port);
+  pi.abort(panel.port);
+  await pi.prompt(panel.port, "Start a new run");
   const prompt = bridge().sent.findLast(e => e.type === "prompt")!;
-  pi.abort();
+  pi.abort(panel.port);
   fromBridge({ type: "prompt_result", promptId: prompt.promptId, started: true });
   fromBridge({ type: "browser_request", id: "late-acceptance", request: { op: "open", url: "https://new.test/" } });
   await waitFor(() => expect(bridge().sent).toContainEqual({ type: "browser_reply", id: "late-acceptance", error: expect.stringContaining("canceled") }));
@@ -111,7 +114,7 @@ test("a late prompt acceptance cannot lift a newer Stop", async () => {
 test("a prompt saved during bridge restart is delivered to the replacement port, and not handed back", async () => {
   const panel = new FakePort("panel");
   await pi.attachPanel(panel.port);
-  await pi.start();
+  await pi.start(panel.port);
   const previous = bridge();
   const addSession = store.addSession;
   let saving = false;
@@ -123,10 +126,10 @@ test("a prompt saved during bridge restart is delivered to the replacement port,
     return addSession(meta);
   });
   try {
-    const sending = pi.prompt("Keep this message");
+    const sending = pi.prompt(panel.port, "Keep this message");
     await waitFor(() => expect(saving).toBe(true));
     // The message finishes storing while the old connection is being torn down.
-    const restarting = pi.restart();
+    const restarting = pi.restart(panel.port);
     release();
     await restarting;
     await sending;

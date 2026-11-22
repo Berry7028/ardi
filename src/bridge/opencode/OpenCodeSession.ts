@@ -20,8 +20,8 @@ import { join } from "node:path";
 import type { ImageAttachment, ModelInfo, ModelState, QueueAction, QueuedMessage, ThinkingLevel } from "../../chat";
 import { restoreOf } from "../../restore";
 import type { BridgeEvent, ScheduleReply } from "../protocol";
-import { prepareWorkDir } from "../launch";
-import { buildServeSpec, SYSTEM_PROMPT } from "./ocLaunch";
+import { prepareWorkDir, SYSTEM_PROMPT } from "../launch";
+import { buildServeSpec } from "./ocLaunch";
 import { OcClient, type OcEvent } from "./ocClient";
 import { createOcNormState, normalizeOcEvent } from "./ocNormalize";
 import { readOcHistory, type OcHistoryEntry } from "./ocHistory";
@@ -64,6 +64,9 @@ export class OpenCodeSession {
   // The schedule endpoint's pending answers, by request id.
   private schedules = new Map<string, (reply: { result?: unknown; error?: string }) => void>();
   private scheduleServer?: Server;
+  // The serve process, held from spawn until shutdown: a `starting` or
+  // `stopped` phase must still kill it so failed launches leave nothing.
+  private serveProc?: ChildProcess;
 
   constructor(
     private readonly target: OpenCodeTarget,
@@ -97,6 +100,7 @@ export class OpenCodeSession {
         return;
       }
       const started = await this.sendPrompt(message);
+      if (!started) this.giveBack([message]);
       if (promptId) this.emit({ type: "prompt_result", promptId, started });
     });
   }
@@ -168,9 +172,8 @@ export class OpenCodeSession {
     this.scheduleServer?.close();
     for (const answer of this.schedules.values()) answer({ error: "Scheduling is gone" });
     this.schedules.clear();
-    if (phase.state !== "running") return;
-    phase.sse.abort();
-    phase.proc.kill();
+    if (phase.state === "running") phase.sse.abort();
+    this.serveProc?.kill();
   }
 
   private get client(): OcClient | undefined {
@@ -244,6 +247,7 @@ export class OpenCodeSession {
     if (this.phase.state === "stopped") return;
     this.phase = { state: "stopped" };
     this.scheduleServer?.close();
+    this.serveProc?.kill();
     this.emit({ type: "fatal", message: [errorMessage(error), stderr].filter(Boolean).join("\n") });
     this.exit(1);
   }
@@ -253,6 +257,7 @@ export class OpenCodeSession {
     prepareWorkDir();
     const spec = buildServeSpec(opencodePath);
     const proc = spawn(spec.command, spec.args, { cwd: spec.cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    this.serveProc = proc;
     let stderrTail = "";
     proc.stderr.on("data", (chunk: Buffer) => {
       process.stderr.write(chunk);
@@ -385,9 +390,16 @@ export class OpenCodeSession {
     const next = !this.running ? (this.queue.find((m) => m.steer) ?? this.queue[0]) : undefined;
     if (next) {
       this.queue.splice(this.queue.indexOf(next), 1);
+      // The run counts from now, before the queue report: submitting it is
+      // async work an off-screen bridge must stay alive for.
+      this.running = true;
       this.reportQueue();
       void this.sendPrompt(next).then((started) => {
-        if (!started) this.giveBack([next]);
+        if (!started) {
+          this.running = false;
+          this.giveBack([next]);
+          this.report();
+        }
       });
     }
     this.report();

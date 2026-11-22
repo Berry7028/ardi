@@ -5,14 +5,11 @@
 import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import type { PiCheck } from "../protocol";
 import { spawnable, type Spawnable } from "../runtime/spawnable";
 import { WORK_DIR } from "../launch";
-
-// Ardi's shared system prompt; the serve gets it through `instructions`.
-export const SYSTEM_PROMPT = resolve(import.meta.dirname, "../../agent/system-prompt.md");
 
 // The user's opencode path (`~` expanded), or the `opencode` on PATH.
 export function opencodeCommand(opencodePath?: string): string {

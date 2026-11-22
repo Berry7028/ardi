@@ -2,6 +2,9 @@
 // `opencode serve` speaking its HTTP + SSE API.
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { FAKE_OC } from "../../support/executables";
 import { waitFor } from "../../support/wait";
 import { OpenCodeSession } from "../../../src/bridge/opencode/OpenCodeSession";
@@ -102,6 +105,33 @@ describe("OpenCodeSession", () => {
     // same wire as the reply test below.
     const first = await ready(0);
     expect(first.ocSessionId).toBeTruthy();
+  });
+
+  test("a prompt the serve rejects goes back to the message box", async () => {
+    process.env.FAKE_OC_FAIL_PROMPT = "1";
+    try {
+      void startSession().prompt("doomed", { promptId: "p1" });
+      await waitFor(() => expect(events.some((e) => e.type === "prompt_result" && e.promptId === "p1" && e.started === false)).toBe(true));
+      expect(events).toContainEqual({ type: "restore", text: "doomed" });
+    } finally {
+      delete process.env.FAKE_OC_FAIL_PROMPT;
+    }
+  });
+
+  test("a launch that fails after spawn leaves no serve running", async () => {
+    // PATCH /config refused: the serve is up, so shutdown must kill it.
+    const log = join(process.env.HOME!, "oc-launch-log.json");
+    process.env.FAKE_OC_FAIL_CONFIG = "1";
+    process.env.FAKE_OPENCODE_LAUNCH_LOG = log;
+    try {
+      startSession();
+      await waitFor(() => expect(events.some((e) => e.type === "fatal")).toBe(true));
+      const { pid } = JSON.parse(readFileSync(log, "utf8")) as { pid: number };
+      await waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
+    } finally {
+      delete process.env.FAKE_OC_FAIL_CONFIG;
+      delete process.env.FAKE_OPENCODE_LAUNCH_LOG;
+    }
   });
 
   test("resuming an ocSessionId keeps its history", async () => {

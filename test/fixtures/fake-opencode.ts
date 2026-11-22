@@ -130,6 +130,7 @@ const handle = async (req: any, res: any) => {
     return json(res, 200, { all: [{ id: "fake", name: "Fake", models: { m1: { name: "Fake M1" }, m2: { name: "Fake M2" } } }], connected: ["fake"], default: { fake: "m1" } });
   }
   if (req.method === "GET" && url.pathname === "/config") return json(res, 200, config);
+  if (process.env.FAKE_OC_FAIL_CONFIG && req.method === "PATCH" && url.pathname === "/config") return json(res, 500, { error: "config refused" });
   if (req.method === "PATCH" && url.pathname === "/config") {
     config = { ...config, ...send(true) };
     return json(res, 200, config);
@@ -143,6 +144,7 @@ const handle = async (req: any, res: any) => {
   if (!session) return json(res, 404, { error: "not found" });
   if (req.method === "GET" && !sub) return json(res, 200, { id: session.id, model: { providerID: "fake", modelID: "m1" } });
   if (req.method === "GET" && sub === "message") return json(res, 200, session.messages);
+  if (process.env.FAKE_OC_FAIL_PROMPT && req.method === "POST" && sub === "prompt_async") return json(res, 500, { error: "prompt refused" });
   if (req.method === "POST" && sub === "prompt_async") {
     const request = send(true);
     const text = (request?.parts ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");

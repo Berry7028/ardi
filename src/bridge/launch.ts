@@ -18,7 +18,7 @@ export const SKILLS_DIR = join(WORK_DIR, ".agents", "skills");
 
 // Pi's shared system prompt: src/agent/ from source, the copy in
 // dist/<target>/agent/ when built.
-const SYSTEM_PROMPT = resolve(import.meta.dirname, "../agent/system-prompt.md");
+export const SYSTEM_PROMPT = resolve(import.meta.dirname, "../agent/system-prompt.md");
 
 // Every built-in tool. Named explicitly, with the target's browser tools, so
 // the user's own pi `defaultTools` setting doesn't change what Ardi gets.

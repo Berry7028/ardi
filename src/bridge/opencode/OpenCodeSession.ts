@@ -1,13 +1,16 @@
 // One `opencode serve` process on one opencode session for its life (each
-// chat has its own bridge). Mirrors PiSession's shape: the same public
-// methods, the same SessionUpdate/BridgeEvent contract, so the extension
-// can't tell which agent it's talking to.
+// chat has its own bridge). Speaks OpenCode 2's /api surface. Mirrors
+// PiSession's shape: the same public methods, the same
+// SessionUpdate/BridgeEvent contract, so the extension can't tell which agent
+// it's talking to.
 //
-// Differences from pi: prompts queue client-side (opencode has no editable
-// queue; a steering message just goes first when the run settles); the
-// schedule tools reach the extension through a small HTTP endpoint this
-// session serves (the MCP server calls it); tool/permission asks are
-// auto-answered "always", matching pi's always-allowed tools.
+// Differences from pi: prompts queue client-side (the bridge serializes them;
+// a steering message just goes first when the run settles); the schedule
+// tools reach the extension through a small HTTP endpoint this session serves
+// (the MCP server calls it); permission asks are auto-answered "always",
+// matching pi's always-allowed tools. The serve needs a password: the bridge
+// sets OPENCODE_SERVER_PASSWORD before spawning it and authenticates every
+// request with it.
 
 import { spawn, type ChildProcess, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
@@ -20,7 +23,7 @@ import { join } from "node:path";
 import type { ImageAttachment, ModelInfo, ModelState, QueueAction, QueuedMessage, ThinkingLevel } from "../../chat";
 import { restoreOf } from "../../restore";
 import type { BridgeEvent, ScheduleReply } from "../protocol";
-import { prepareWorkDir, SYSTEM_PROMPT } from "../launch";
+import { prepareWorkDir, SYSTEM_PROMPT, WORK_DIR } from "../launch";
 import { buildServeSpec } from "./ocLaunch";
 import { OcClient, type OcEvent } from "./ocClient";
 import { createOcNormState, normalizeOcEvent } from "./ocNormalize";
@@ -41,6 +44,10 @@ type Phase =
   | { state: "stopped" };
 
 type Message = { text: string; steer: boolean; images?: ImageAttachment[] };
+
+// Bodies the /api endpoints answer with.
+type OcSessionInfo = { id: string; model?: { providerID?: string; id?: string } };
+type OcModel = { id: string; providerID: string; name?: string };
 
 const STDERR_BUFFER_LIMIT = 8_000;
 const PORT_LINE = /127\.0\.0\.1:(\d+)/;
@@ -123,7 +130,7 @@ export class OpenCodeSession {
     const stopping = (async () => {
       this.giveBack(this.takeQueue());
       if (this.phase.state === "running") {
-        await this.phase.client.post(`/session/${this.phase.sessionId}/abort`).catch((error: unknown) => this.notice(error));
+        await this.phase.client.post(`/api/session/${this.phase.sessionId}/interrupt`).catch((error: unknown) => this.notice(error));
       }
     })();
     this.track(stopping);
@@ -133,10 +140,7 @@ export class OpenCodeSession {
   compact(): Promise<void> {
     return this.exclusive(async () => {
       if (this.phase.state !== "running") return;
-      const body: Record<string, unknown> = { auto: false };
-      if (this.model) body.providerID = this.model.provider;
-      if (this.model) body.modelID = this.model.id;
-      const compacting = this.phase.client.post(`/session/${this.phase.sessionId}/summarize`, body).catch((error: unknown) => {
+      const compacting = this.phase.client.post(`/api/session/${this.phase.sessionId}/compact`, {}).catch((error: unknown) => {
         this.notice(error);
       });
       this.track(compacting);
@@ -146,7 +150,9 @@ export class OpenCodeSession {
   setModel(provider: string, modelId: string): Promise<void> {
     return this.exclusive(async () => {
       if (this.phase.state === "running") {
-        await this.phase.client.patch("/config", { model: `${provider}/${modelId}` }).catch((error: unknown) => this.notice(error));
+        await this.phase.client
+          .post(`/api/session/${this.phase.sessionId}/model`, { model: { providerID: provider, id: modelId } })
+          .catch((error: unknown) => this.notice(error));
       }
       this.model = { provider, id: modelId };
       this.emitModel();
@@ -256,7 +262,41 @@ export class OpenCodeSession {
     if (this.phase.state !== "starting") return;
     prepareWorkDir();
     const spec = buildServeSpec(opencodePath);
-    const proc = spawn(spec.command, spec.args, { cwd: spec.cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const password = randomBytes(24).toString("base64url");
+    const schedule = await this.scheduleEndpoint();
+
+    const instructions = join((await mkdtemp(join(tmpdir(), "ardi-oc-"))), "instructions.md");
+    await writeFile(instructions, [await readFile(SYSTEM_PROMPT, "utf8"), environmentSection(), `Today is ${today()}.`, ...(this.target.guide ?? [])].join("\n\n"));
+    // Extra config the serve merges in: the system-prompt file and the MCP
+    // server that carries this target's tools. codemode stays off so the tools
+    // are directly callable instead of behind Code Mode.
+    const config = {
+      instructions: [instructions],
+      mcp: {
+        servers: {
+          ardi: {
+            type: "local",
+            command: [globalThis.process.execPath, this.target.mcpServer],
+            codemode: false,
+            environment: {
+              // The bridge's own env vars, which serve inherits and passes on
+              // to the MCP server it spawns.
+              ARDI_BROWSER_URL: process.env.ARDI_BROWSER_URL ?? "",
+              ARDI_BROWSER_TOKEN: process.env.ARDI_BROWSER_TOKEN ?? "",
+              ARDI_SCHEDULE_URL: schedule.url,
+              ARDI_SCHEDULE_TOKEN: schedule.token,
+            },
+          },
+        },
+      },
+    };
+
+    const proc = spawn(spec.command, spec.args, {
+      cwd: spec.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      env: { ...process.env, OPENCODE_SERVER_PASSWORD: password, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) },
+    });
     this.serveProc = proc;
     let stderrTail = "";
     proc.stderr.on("data", (chunk: Buffer) => {
@@ -268,64 +308,35 @@ export class OpenCodeSession {
       if (this.phase.state === "stopped") return;
       this.fail(new Error(`opencode exited (${signal ? `signal ${signal}` : `code ${code}`})`), stderrTail);
     });
-    const client = new OcClient(`http://${await listenPort(proc)}`);
+    const client = new OcClient(`http://${await listenPort(proc)}`, password);
 
     const sessionId = await this.findSession(client, ocSessionId);
-    const schedule = await this.scheduleEndpoint();
-
-    const instructions = join((await mkdtemp(join(tmpdir(), "ardi-oc-"))), "instructions.md");
-    await writeFile(instructions, [await readFile(SYSTEM_PROMPT, "utf8"), environmentSection(), `Today is ${today()}.`, ...(this.target.guide ?? [])].join("\n\n"));
-    await client.patch("/config", {
-      instructions: [instructions],
-      mcp: {
-        ardi: {
-          type: "local",
-          command: [globalThis.process.execPath, this.target.mcpServer],
-          enabled: true,
-          environment: {
-            // The bridge's own env vars, which serve inherits and passes on
-            // to the MCP server it spawns.
-            ARDI_BROWSER_URL: process.env.ARDI_BROWSER_URL ?? "",
-            ARDI_BROWSER_TOKEN: process.env.ARDI_BROWSER_TOKEN ?? "",
-            ARDI_SCHEDULE_URL: schedule.url,
-            ARDI_SCHEDULE_TOKEN: schedule.token,
-            ARDI_CHAT_ID: sessionId,
-          },
-        },
-      },
-    });
 
     const sse = new AbortController();
     this.phase = { state: "running", proc, client, sessionId, sse };
     void this.followEvents(client, sessionId, sse.signal);
 
-    const { all: providers, connected } = await client.get<{ all: { id: string; models: Record<string, { name?: string }> }[]; connected: string[]; default: Record<string, string> }>("/provider");
-    const connectedSet = new Set(connected);
-    this.models = providers
-      .filter((provider: { id: string }) => connectedSet.has(provider.id))
-      .flatMap((provider: { id: string; models: Record<string, { name?: string }> }) =>
-        Object.entries(provider.models).map(([id, model]: [string, { name?: string }]) => ({ provider: provider.id, id, name: model.name ?? id, thinkingLevels: [] })),
-      );
+    const { data: models } = await client.get<{ location: unknown; data: OcModel[] }>(`/api/model?location[directory]=${encodeURIComponent(WORK_DIR)}`);
+    this.models = models.map((model) => ({ provider: model.providerID, id: model.id, name: model.name ?? model.id, thinkingLevels: [] }));
 
-    const session = await client.get<{ model?: { providerID?: string; modelID?: string } }>(`/session/${sessionId}`).catch(() => undefined);
-    if (session?.model?.providerID && session.model.modelID) this.model = { provider: session.model.providerID, id: session.model.modelID };
+    const session = await client.get<{ data: OcSessionInfo }>(`/api/session/${sessionId}`).catch(() => undefined);
+    if (session?.data.model?.providerID && session.data.model.id) this.model = { provider: session.data.model.providerID, id: session.data.model.id };
     else {
-      const config = await client.get<{ model?: string }>("/config").catch(() => undefined);
-      const [provider, id] = config?.model?.split("/") ?? [];
-      if (provider && id) this.model = { provider, id };
+      const fallback = await client.get<{ data?: OcModel }>(`/api/model/default?location[directory]=${encodeURIComponent(WORK_DIR)}`).catch(() => undefined);
+      if (fallback?.data) this.model = { provider: fallback.data.providerID, id: fallback.data.id };
     }
 
-    const entries = await client.get<OcHistoryEntry[]>(`/session/${sessionId}/message`).catch(() => [] as OcHistoryEntry[]);
-    this.emit({ type: "ready", ocSessionId: sessionId, history: readOcHistory(entries), model: this.modelState(), commands: [] });
+    const history = await client.get<{ data: OcHistoryEntry[] }>(`/api/session/${sessionId}/message`).catch(() => ({ data: [] as OcHistoryEntry[] }));
+    this.emit({ type: "ready", ocSessionId: sessionId, history: readOcHistory(history.data), model: this.modelState(), commands: [] });
   }
 
   private async findSession(client: OcClient, ocSessionId?: string): Promise<string> {
     if (ocSessionId) {
-      const existing = await client.get<{ id: string }>(`/session/${ocSessionId}`).catch(() => undefined);
-      if (existing) return existing.id;
+      const existing = await client.get<{ data: OcSessionInfo }>(`/api/session/${ocSessionId}`).catch(() => undefined);
+      if (existing) return existing.data.id;
     }
-    const created = await client.post<{ id: string }>("/session", {});
-    return created.id;
+    const created = await client.post<{ data: OcSessionInfo }>("/api/session", { location: { directory: WORK_DIR } });
+    return created.data.id;
   }
 
   // Serves POST /schedule for the MCP server's schedule tools: each call is a
@@ -373,18 +384,17 @@ export class OpenCodeSession {
 
   // false stops the loop.
   private onEvent(event: OcEvent, sessionId: string): boolean {
-    const p = event.properties;
+    const data = event.data;
     if (event.type === "permission.asked") {
-      const id = (p.permission as { id?: string } | undefined)?.id ?? (p.id as string | undefined);
-      if (id) void this.client?.post(`/session/${sessionId}/permissions/${id}`, { response: "always" }).catch(() => {});
+      const id = data.id as string | undefined;
+      if (id) void this.client?.post(`/api/session/${sessionId}/permission/${id}/reply`, { decision: "always" }).catch(() => {});
       return true;
     }
-    const eventSession = p.sessionID as string | undefined;
+    const eventSession = data.sessionID as string | undefined;
     if (eventSession && eventSession !== sessionId) return true;
     for (const chunk of normalizeOcEvent(event, this.normalization)) this.emit({ type: "chunk", chunk });
-    const status = (p.status as { type?: string } | undefined)?.type;
-    if (event.type === "session.status" && status === "busy") this.running = true;
-    if (event.type === "session.idle" || (event.type === "session.status" && status === "idle")) this.running = false;
+    if (event.type === "session.execution.started") this.running = true;
+    if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed" || event.type === "session.execution.interrupted") this.running = false;
     // A queued message runs next once the serve goes idle; run_end already
     // went out for the last run.
     const next = !this.running ? (this.queue.find((m) => m.steer) ?? this.queue[0]) : undefined;
@@ -409,26 +419,29 @@ export class OpenCodeSession {
   private async sendPrompt(message: Message): Promise<boolean> {
     if (this.phase.state !== "running") return false;
     const { client, sessionId } = this.phase;
-    const parts: Record<string, unknown>[] = [{ type: "text", text: message.text || " " }];
-    for (const image of message.images ?? []) {
-      parts.push({ type: "file", mime: image.mimeType, filename: "image", url: `data:${image.mimeType};base64,${image.data}` });
-    }
-    const body: Record<string, unknown> = { parts };
-    if (this.model) body.model = { providerID: this.model.provider, modelID: this.model.id };
-    const sent = await client.post(`/session/${sessionId}/prompt_async`, body).then(
+    const body: Record<string, unknown> = {
+      text: message.text || " ",
+      files: (message.images ?? []).map((image) => ({ uri: `data:${image.mimeType};base64,${image.data}`, name: "image" })),
+    };
+    const sent = await client.post(`/api/session/${sessionId}/prompt`, body).then(
       () => true,
       (error: unknown) => {
         this.notice(error);
         return false;
       },
     );
-    // Until the serve's busy event lands, count the run as started so the
-    // next prompt queues instead of racing it.
-    if (sent) {
-      this.running = true;
-      this.report();
-    }
-    return sent;
+    if (!sent) return false;
+    // The serve only streams assistant deltas, so the user bubble goes out
+    // from here.
+    this.emit({
+      type: "chunk",
+      chunk: { type: "user", text: message.text, at: Date.now(), ...(message.images?.length ? { images: message.images } : {}) },
+    });
+    // Until the serve's execution.started lands, count the run as started so
+    // the next prompt queues instead of racing it.
+    this.running = true;
+    this.report();
+    return true;
   }
 
   private emitModel(): void {
@@ -440,7 +453,7 @@ export class OpenCodeSession {
   }
 }
 
-// The port the serve chose, from its `opencode server listening on …` line.
+// The port the serve chose, from its `server listening on …` line.
 function listenPort(proc: ChildProcessByStdio<null, Readable, Readable>): Promise<string> {
   return new Promise((done, reject) => {
     let buffer = "";

@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-// A stand-in for `opencode serve`, for bridge tests. Speaks the serve's HTTP
-// + SSE API just enough for OpenCodeSession: POST /session, GET /session/{id}
-// and /message, PATCH+GET /config, GET /provider, POST prompt_async (204),
-// /abort, /summarize, /permissions/{id}, GET /event (SSE).
+// A stand-in for OpenCode 2's `opencode serve`, for bridge tests. Speaks the
+// /api HTTP + SSE surface just enough for OpenCodeSession: POST+GET
+// /api/session, GET /api/session/{id}/message, GET /api/model(+default), POST
+// /api/session/{id}/prompt|interrupt|compact|model|permission/{id}/reply, GET
+// /api/event (SSE). Auth headers are accepted, not checked.
 //
-// Event shapes follow api.json's SSE {type, properties}. A prompt for "hold"
-// goes busy and stays until aborted; any other text replies "echo: X" and
-// goes idle. "tool:" prompts show a completed list_tabs tool part. Abort
-// reports MessageAbortedError. FAKE_OPENCODE_LAUNCH_LOG records spawn env.
+// Events use the v2 {id,type,created,data} envelope. A prompt for "hold" runs
+// until interrupted; "hold:ms" replies after that long; any other text
+// replies "echo: X" and the execution succeeds. "tool:" prompts show a
+// completed list_tabs tool call. FAKE_OPENCODE_LAUNCH_LOG records spawn env.
+// FAKE_OC_FAIL_PROMPT / FAKE_OC_FAIL_MODEL force 500s on those endpoints.
 
 import { createServer } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -31,61 +33,51 @@ const STORE = join(process.env.HOME!, "fake-oc-sessions.json");
 const sessions: Map<string, any> = new Map(existsSync(STORE) ? JSON.parse(readFileSync(STORE, "utf8")) : []);
 for (const id of sessions.keys()) nextSession = Math.max(nextSession, Number(id.replace("ses_", "")) + 1);
 const listeners = new Set<any>();
-let config: Record<string, unknown> = { model: "fake/m1" };
 
 function save() {
   writeFileSync(STORE, JSON.stringify([...sessions].map(([id, s]) => [id, { id: s.id, messages: s.messages }])));
 }
 
-function emit(type: string, properties: Record<string, unknown>) {
-  const line = `data: ${JSON.stringify({ id: String(Date.now()), type, properties })}\n\n`;
+function emit(type: string, data: Record<string, unknown>) {
+  const line = `data: ${JSON.stringify({ id: `evt_${Date.now()}_${Math.random()}`, type, created: Date.now(), data })}\n\n`;
   for (const res of listeners) res.write(line);
 }
 
 const json = (res: any, code: number, body: unknown) => res.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(body));
 
-function message(session: any, id: string, role: string, time: Record<string, unknown> = {}) {
-  const info: Record<string, unknown> = { id, sessionID: session.id, role, time: { created: Date.now(), ...time }, modelID: "m1", providerID: "fake" };
-  if (role === "assistant") info.tokens = { output: 3 };
-  session.messages.push({ info, parts: [] });
-  return session.messages.at(-1);
-}
-
-function part(entry: any, fields: Record<string, unknown>) {
-  const p = { id: `prt_${entry.parts.length}`, messageID: entry.info.id, sessionID: entry.info.sessionID, ...fields };
-  entry.parts.push(p);
-  return p;
-}
-
-function broadcastEntry(entry: any) {
-  emit("message.updated", { info: entry.info });
-  for (const p of entry.parts) emit("message.part.updated", { part: p });
-}
-
-// Replies to a prompt and ends the run idle.
+// Replies to a prompt and ends the execution.
 function reply(session: any, text: string) {
-  const reply = message(session, `msg_a${session.messages.length}`, "assistant", { completed: Date.now() });
+  const assistantID = `msg_a${session.messages.length}`;
   if (text.startsWith("tool:")) {
-    part(reply, { type: "tool", callID: "call_1", tool: "list_tabs", state: { status: "running", input: {} } });
-    emit("message.updated", { info: reply.info });
-    emit("message.part.updated", { part: reply.parts[0] });
-    reply.parts[0].state = { status: "completed", input: {}, output: "1 tab", metadata: { count: 1 } };
-    emit("message.part.updated", { part: reply.parts[0] });
+    emit("session.tool.input.started", { sessionID: session.id, assistantMessageID: assistantID, id: "call_1", name: "list_tabs" });
+    emit("session.tool.called", { sessionID: session.id, assistantMessageID: assistantID, id: "call_1", input: {}, executed: true });
+    emit("session.tool.success", { sessionID: session.id, assistantMessageID: assistantID, id: "call_1", content: [{ type: "text", text: "1 tab" }], metadata: { count: 1 }, executed: true });
+    session.messages.push({
+      id: assistantID,
+      type: "assistant",
+      time: { created: Date.now(), completed: Date.now() },
+      tokens: { output: 3 },
+      content: [{ type: "tool", id: "call_1", name: "list_tabs", state: { status: "completed", input: {}, content: [{ type: "text", text: "1 tab" }], metadata: { count: 1 } } }],
+    });
   } else {
-    part(reply, { type: "text", text: `echo: ${text}` });
-    broadcastEntry(reply);
+    emit("session.text.delta", { sessionID: session.id, assistantMessageID: assistantID, ordinal: 0, delta: `echo: ${text}` });
+    session.messages.push({
+      id: assistantID,
+      type: "assistant",
+      time: { created: Date.now(), completed: Date.now() },
+      tokens: { output: 3 },
+      content: [{ type: "text", text: `echo: ${text}` }],
+    });
   }
-  emit("session.status", { sessionID: session.id, status: { type: "idle" } });
-  emit("session.idle", { sessionID: session.id });
+  emit("session.step.ended", { sessionID: session.id, assistantMessageID: assistantID, finish: "stop", cost: 0, tokens: { output: 3 } });
+  emit("session.execution.succeeded", { sessionID: session.id });
 }
 
-// Runs the prompt: user message, then "echo" or a held run; ends idle.
-// "hold" stays busy until aborted; "hold:ms" replies after that long.
+// Runs the prompt: user message recorded, then "echo" or a held run.
+// "hold" stays running until interrupted; "hold:ms" replies after that long.
 function run(session: any, text: string) {
-  emit("session.status", { sessionID: session.id, status: { type: "busy" } });
-  const user = message(session, `msg_u${session.messages.length}`, "user");
-  part(user, { type: "text", text });
-  broadcastEntry(user);
+  session.messages.push({ id: `msg_u${session.messages.length}`, type: "user", text, time: { created: Date.now() } });
+  emit("session.execution.started", { sessionID: session.id });
   if (text === "hold" || text.startsWith("hold:")) {
     session.holding = true;
     const ms = text === "hold" ? null : Number(text.slice(5));
@@ -96,7 +88,7 @@ function run(session: any, text: string) {
         save();
       }, ms);
     }
-    return; // "hold" idles on abort
+    return; // "hold" ends on interrupt
   }
   reply(session, text);
 }
@@ -108,73 +100,77 @@ const handle = async (req: any, res: any) => {
   await new Promise<void>((done) => {
     req.on("end", () => done());
   });
-  const send = (object: boolean) => {
+  const send = () => {
     try {
-      return object ? JSON.parse(body || "{}") : undefined;
+      return JSON.parse(body || "{}");
     } catch {
       return undefined;
     }
   };
-  const m = url.pathname.match(/^\/session\/([^/]+)(?:\/(.+))?$/);
+  const m = url.pathname.match(/^\/api\/session\/([^/]+)(?:\/(.+))?$/);
   const session = m && sessions.get(m[1]);
   const sub = m?.[2] ?? "";
 
-  if (req.method === "GET" && url.pathname === "/event") {
+  if (req.method === "GET" && url.pathname === "/api/event") {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
-    res.write(`data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: "evt_0", type: "server.connected", created: Date.now(), data: {} })}\n\n`);
     listeners.add(res);
     req.on("close", () => listeners.delete(res));
     return;
   }
-  if (req.method === "GET" && url.pathname === "/provider") {
-    return json(res, 200, { all: [{ id: "fake", name: "Fake", models: { m1: { name: "Fake M1" }, m2: { name: "Fake M2" } } }], connected: ["fake"], default: { fake: "m1" } });
+  if (req.method === "GET" && url.pathname === "/api/model") {
+    if (process.env.FAKE_OC_FAIL_MODEL) return json(res, 500, { error: "model refused" });
+    return json(res, 200, { location: { directory: "/" }, data: [{ id: "m1", providerID: "fake", name: "Fake M1" }, { id: "m2", providerID: "fake", name: "Fake M2" }] });
   }
-  if (req.method === "GET" && url.pathname === "/config") return json(res, 200, config);
-  if (process.env.FAKE_OC_FAIL_CONFIG && req.method === "PATCH" && url.pathname === "/config") return json(res, 500, { error: "config refused" });
-  if (req.method === "PATCH" && url.pathname === "/config") {
-    config = { ...config, ...send(true) };
-    return json(res, 200, config);
+  if (req.method === "GET" && url.pathname === "/api/model/default") {
+    return json(res, 200, { location: { directory: "/" }, data: { id: "m1", providerID: "fake", name: "Fake M1" } });
   }
-  if (req.method === "POST" && url.pathname === "/session") {
+  if (req.method === "POST" && url.pathname === "/api/session") {
     const id = `ses_${nextSession++}`;
     sessions.set(id, { id, messages: [] });
     save();
-    return json(res, 200, { id });
+    return json(res, 200, { data: { id } });
   }
   if (!session) return json(res, 404, { error: "not found" });
-  if (req.method === "GET" && !sub) return json(res, 200, { id: session.id, model: { providerID: "fake", modelID: "m1" } });
-  if (req.method === "GET" && sub === "message") return json(res, 200, session.messages);
-  if (process.env.FAKE_OC_FAIL_PROMPT && req.method === "POST" && sub === "prompt_async") return json(res, 500, { error: "prompt refused" });
-  if (req.method === "POST" && sub === "prompt_async") {
-    const request = send(true);
-    const text = (request?.parts ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
+  if (req.method === "GET" && !sub) return json(res, 200, { data: { id: session.id, model: { providerID: "fake", id: "m1" } } });
+  if (req.method === "GET" && sub === "message") return json(res, 200, { data: session.messages, cursor: {} });
+  if (process.env.FAKE_OC_FAIL_PROMPT && req.method === "POST" && sub === "prompt") return json(res, 500, { error: "prompt refused" });
+  if (req.method === "POST" && sub === "prompt") {
+    const request = send();
+    const text = request?.text ?? "";
     setImmediate(() => {
       run(session, text);
       save();
     });
-    res.writeHead(204).end();
-    return;
+    return json(res, 200, { data: { id: `msg_u${session.messages.length}`, text } });
   }
-  if (req.method === "POST" && sub === "abort") {
+  if (req.method === "POST" && sub === "interrupt") {
     if (session.holding) {
       session.holding = false;
       clearTimeout(session.holdTimer);
-      emit("session.error", { sessionID: session.id, error: { name: "MessageAbortedError", data: { message: "The user aborted" } } });
-      emit("session.status", { sessionID: session.id, status: { type: "idle" } });
-      emit("session.idle", { sessionID: session.id });
+      emit("session.execution.interrupted", { sessionID: session.id, reason: "user" });
+      return json(res, 200, { interrupted: true });
     }
-    return json(res, 200, true);
+    return json(res, 200, { interrupted: false });
   }
-  if (req.method === "POST" && sub === "summarize") {
-    emit("session.compacted", { sessionID: session.id });
-    return json(res, 200, true);
+  if (req.method === "POST" && sub === "compact") {
+    emit("session.compaction.ended", { sessionID: session.id });
+    return json(res, 200, { data: {} });
   }
-  if (req.method === "POST" && sub.startsWith("permissions/")) return json(res, 200, {});
+  if (req.method === "POST" && sub === "model") {
+    session.model = send()?.model;
+    res.writeHead(204).end();
+    return;
+  }
+  if (req.method === "POST" && sub.match(/^permission\/[^/]+\/reply$/)) {
+    res.writeHead(204).end();
+    return;
+  }
   return json(res, 404, { error: "not found" });
 };
 
 const server = createServer((req, res) => void handle(req, res));
 
 server.listen(port, hostname, () => {
-  console.log(`opencode server listening on http://${hostname}:${(server.address() as { port: number }).port}`);
+  console.log(`server listening on http://${hostname}:${(server.address() as { port: number }).port}`);
 });

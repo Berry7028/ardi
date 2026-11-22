@@ -2,21 +2,22 @@ import { describe, expect, test } from "bun:test";
 
 import { readOcHistory, type OcHistoryEntry } from "../../../../src/bridge/opencode/ocHistory";
 
-const user = (id: string, text: string, at = 1000): OcHistoryEntry => ({
-  info: { id, role: "user", time: { created: at } },
-  parts: [{ id: `${id}p`, type: "text", messageID: id, text }],
+const user = (id: string, text: string, at = 1000): OcHistoryEntry => ({ id, type: "user", text, time: { created: at } });
+const assistant = (id: string, content: OcHistoryEntry["content"], at = 2000, extra: Record<string, unknown> = {}): OcHistoryEntry => ({
+  id,
+  type: "assistant",
+  content,
+  time: { created: at, completed: at + 500 },
+  tokens: { output: 5 },
+  ...extra,
 });
-const assistant = (id: string, parts: OcHistoryEntry["parts"], at = 2000, info: Record<string, unknown> = {}): OcHistoryEntry => ({
-  info: { id, role: "assistant", time: { created: at, completed: at + 500 }, tokens: { output: 5 }, ...info },
-  parts,
-});
-const text = (id: string, messageID: string, content: string) => ({ id, type: "text", messageID, text: content });
-const reasoning = (id: string, messageID: string, content: string) => ({ id, type: "reasoning", messageID, text: content });
-const tool = (id: string, messageID: string, state: Record<string, unknown>) => ({ id, type: "tool", messageID, callID: `call_${id}`, tool: "list_tabs", state });
+const text = (content: string) => ({ type: "text", text: content });
+const reasoning = (content: string) => ({ type: "reasoning", text: content });
+const tool = (id: string, state: Record<string, unknown>) => ({ type: "tool", id, name: "list_tabs", state });
 
 describe("readOcHistory", () => {
   test("a user message then its reply is one run", () => {
-    expect(readOcHistory([user("u1", "hi"), assistant("a1", [text("p1", "a1", "hello")])])).toEqual([
+    expect(readOcHistory([user("u1", "hi"), assistant("a1", [text("hello")])])).toEqual([
       { role: "user", id: "u1", content: "hi", timestamp: 1000, images: undefined },
       {
         role: "assistant",
@@ -35,8 +36,8 @@ describe("readOcHistory", () => {
   test("consecutive assistant entries merge into one run", () => {
     const messages = readOcHistory([
       user("u1", "hi"),
-      assistant("a1", [reasoning("r1", "a1", "thinking"), tool("t1", "a1", { status: "completed", input: {}, output: "2 tabs" })]),
-      assistant("a2", [text("p2", "a2", "done")]),
+      assistant("a1", [reasoning("thinking"), tool("call_t1", { status: "completed", input: {}, content: [{ type: "text", text: "2 tabs" }] })]),
+      assistant("a2", [text("done")]),
     ]);
     expect(messages).toHaveLength(2);
     const run = messages[1];
@@ -52,26 +53,40 @@ describe("readOcHistory", () => {
     });
   });
 
-  test("an aborted reply's run is interrupted", () => {
-    const [run] = readOcHistory([user("u1", "hi"), assistant("a1", [text("p1", "a1", "partial")], 2000, { error: { name: "MessageAbortedError" } })]).filter(
-      (m) => m.role === "assistant",
-    );
+  test("an interrupted idle marks the run interrupted", () => {
+    const [run] = readOcHistory([
+      user("u1", "hi"),
+      assistant("a1", [text("partial")]),
+      { id: "i1", type: "idle", outcome: "interrupted", time: { created: 3000 } },
+    ]).filter((m) => m.role === "assistant");
     expect(run.interrupted).toBe(true);
   });
 
-  test("a compaction part is a notice between messages", () => {
-    const messages = readOcHistory([user("u1", "hi"), assistant("a1", [text("p1", "a1", "hi"), { id: "c1", type: "compaction", messageID: "a1" }]), user("u2", "again", 3000)]);
+  test("a compaction entry is a notice between messages", () => {
+    const messages = readOcHistory([
+      user("u1", "hi"),
+      assistant("a1", [text("hi")]),
+      { id: "c1", type: "compaction", status: "completed", time: { created: 2500 } },
+      user("u2", "again", 3000),
+    ]);
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "notice", "user"]);
   });
 
-  test("user image parts become attachments", () => {
+  test("user file attachments become images", () => {
     const entry: OcHistoryEntry = {
-      info: { id: "u1", role: "user", time: { created: 1000 } },
-      parts: [
-        { id: "f1", type: "file", messageID: "u1", mime: "image/png", url: "data:image/png;base64,QUJD" },
-        { id: "t1", type: "text", messageID: "u1", text: "look" },
-      ],
+      id: "u1",
+      type: "user",
+      text: "look",
+      files: [{ uri: "data:image/png;base64,QUJD", name: "image" }],
+      time: { created: 1000 },
     };
     expect(readOcHistory([entry])).toEqual([{ role: "user", id: "u1", content: "look", images: [{ data: "QUJD", mimeType: "image/png" }], timestamp: 1000 }]);
+  });
+
+  test("an errored tool keeps its error as the result", () => {
+    const [run] = readOcHistory([user("u1", "hi"), assistant("a1", [tool("call_1", { status: "error", input: {}, error: { message: "Tab gone" } })])]).filter(
+      (m) => m.role === "assistant",
+    );
+    expect(run.toolCalls).toEqual([{ id: "call_1", name: "list_tabs", input: {}, status: "error", result: "Tab gone", details: undefined }]);
   });
 });

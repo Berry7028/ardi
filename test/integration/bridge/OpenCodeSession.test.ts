@@ -56,10 +56,13 @@ describe("OpenCodeSession", () => {
     void startSession().prompt("hello");
     await waitFor(() => expect(chunks().at(-1)?.type).toBe("run_end"));
     expect(readies()[0].type).toBe("ready");
+    // The user chunk comes from the send itself; the serve only streams the
+    // assistant's side of the run.
     expect(chunks()).toEqual([
-      { type: "run_start", at: expect.any(Number) },
       { type: "user", text: "hello", at: expect.any(Number) },
+      { type: "run_start", at: expect.any(Number) },
       { type: "text", content: "echo: hello" },
+      { type: "usage", outputTokens: 3 },
       { type: "run_end", at: expect.any(Number) },
     ]);
   });
@@ -119,9 +122,9 @@ describe("OpenCodeSession", () => {
   });
 
   test("a launch that fails after spawn leaves no serve running", async () => {
-    // PATCH /config refused: the serve is up, so shutdown must kill it.
+    // GET /api/model refused: the serve is up, so shutdown must kill it.
     const log = join(process.env.HOME!, "oc-launch-log.json");
-    process.env.FAKE_OC_FAIL_CONFIG = "1";
+    process.env.FAKE_OC_FAIL_MODEL = "1";
     process.env.FAKE_OPENCODE_LAUNCH_LOG = log;
     try {
       startSession();
@@ -129,7 +132,7 @@ describe("OpenCodeSession", () => {
       const { pid } = JSON.parse(readFileSync(log, "utf8")) as { pid: number };
       await waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
     } finally {
-      delete process.env.FAKE_OC_FAIL_CONFIG;
+      delete process.env.FAKE_OC_FAIL_MODEL;
       delete process.env.FAKE_OPENCODE_LAUNCH_LOG;
     }
   });

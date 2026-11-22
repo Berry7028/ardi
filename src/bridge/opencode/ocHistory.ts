@@ -1,44 +1,47 @@
-// A saved opencode session (GET /session/{id}/message's [{info, parts}]) as
+// A saved opencode session (GET /api/session/{id}/message's {data: [...]}) as
 // chat history, the same shape piHistory produces: consecutive assistant
-// entries merge into one run; tool parts map onto ToolCall.
+// entries merge into one run; tool content maps onto ToolCall.
 
 import type { AssistantBlock, ChatMessage, ImageAttachment, ToolCall } from "../../chat";
 
-export type OcPart = Record<string, unknown> & { id?: string; type?: string; messageID?: string };
-export type OcHistoryEntry = { info: Record<string, unknown>; parts: OcPart[] };
-
-function textOf(part: OcPart): string {
-  return typeof part.text === "string" ? part.text : "";
-}
-
-function imageOf(part: OcPart): ImageAttachment | undefined {
-  const url = typeof part.url === "string" ? part.url : "";
-  const mime = typeof part.mime === "string" ? part.mime : "";
-  const data = /^data:.*?;base64,(.*)$/s.exec(url)?.[1];
-  return mime.startsWith("image/") && data ? { data, mimeType: mime } : undefined;
-}
+export type OcContent = Record<string, unknown> & { type?: string; id?: string };
+export type OcHistoryEntry = Record<string, unknown> & { id?: string; type?: string };
 
 const asString = (value: unknown): string => (typeof value === "string" ? value : typeof value === "number" ? String(value) : "");
 
-function toolCall(part: OcPart): ToolCall | undefined {
-  const state = part.state as { status?: string; input?: Record<string, unknown>; output?: string; error?: string; metadata?: unknown } | undefined;
+const textOf = (content: OcContent): string => (typeof content.text === "string" ? content.text : "");
+
+// A user's file attachment whose uri is a data URL becomes an image.
+function imageOf(file: Record<string, unknown>): ImageAttachment | undefined {
+  const uri = typeof file.uri === "string" ? file.uri : "";
+  const match = /^data:(.*?);base64,(.*)$/s.exec(uri);
+  if (!match || !match[1].startsWith("image/")) return undefined;
+  return { data: match[2], mimeType: match[1] };
+}
+
+function contentText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => asString((part as { text?: string; uri?: string }).text ?? (part as { uri?: string }).uri)).filter(Boolean).join("\n");
+}
+
+function toolCall(content: OcContent): ToolCall | undefined {
+  const state = content.state as { status?: string; input?: Record<string, unknown>; content?: unknown; error?: { message?: string }; metadata?: unknown } | undefined;
   const status = state?.status === "completed" ? "completed" : state?.status === "error" ? "error" : "running";
   return {
-    id: asString(part.callID) || asString(part.id),
-    name: asString(part.tool) || "tool",
+    id: asString(content.id),
+    name: asString(content.name) || "tool",
     input: state?.input ?? {},
     status,
-    result: status === "error" ? (state?.error ?? "Tool failed") : state?.output,
+    result: status === "error" ? ((state?.error as { message?: string } | undefined)?.message ?? "Tool failed") : contentText(state?.content),
     details: state?.metadata,
   };
 }
 
-const at = (info: Record<string, unknown>): number => (info.time as { created?: number } | undefined)?.created ?? 0;
-const completedAt = (info: Record<string, unknown>): number | undefined => (info.time as { completed?: number } | undefined)?.completed;
-const aborted = (info: Record<string, unknown>): boolean => (info.error as { name?: string } | undefined)?.name === "MessageAbortedError";
+const at = (entry: OcHistoryEntry): number => (entry.time as { created?: number } | undefined)?.created ?? 0;
+const completedAt = (entry: OcHistoryEntry): number | undefined => (entry.time as { completed?: number } | undefined)?.completed;
 
 export function readOcHistory(entries: OcHistoryEntry[]): ChatMessage[] {
-  const sorted = [...entries].sort((a, b) => at(a.info) - at(b.info));
+  const sorted = [...entries].sort((a, b) => at(a) - at(b));
   const messages: ChatMessage[] = [];
   // The assistant run being accumulated; flushed at the next non-assistant entry.
   let run: { id: string; blocks: AssistantBlock[]; toolCalls: ToolCall[]; from: number; timestamp: number; completedAt?: number; outputTokens: number; interrupted: boolean } | undefined;
@@ -60,35 +63,37 @@ export function readOcHistory(entries: OcHistoryEntry[]): ChatMessage[] {
     run = undefined;
   };
 
-  for (const { info, parts } of sorted) {
-    const role = info.role as string | undefined;
-    if (role === "user") {
+  for (const entry of sorted) {
+    if (entry.type === "user") {
       flush();
-      const text = parts.filter((p) => p.type === "text").map(textOf).join("");
-      const images = parts.map(imageOf).filter((i): i is ImageAttachment => !!i);
+      const text = asString(entry.text);
+      const images = ((entry.files as Record<string, unknown>[] | undefined) ?? []).map(imageOf).filter((i): i is ImageAttachment => !!i);
       if (text || images.length) {
-        messages.push({ role: "user", id: String(info.id), content: text, images: images.length ? images : undefined, timestamp: at(info) });
+        messages.push({ role: "user", id: asString(entry.id), content: text, images: images.length ? images : undefined, timestamp: at(entry) });
       }
       continue;
     }
-    if (role !== "assistant") {
+    if (entry.type === "compaction") {
+      flush();
+      messages.push({ role: "notice", id: asString(entry.id), content: "Context compacted", level: "info", timestamp: at(entry) });
+      continue;
+    }
+    if (entry.type === "idle") {
+      if (run && entry.outcome === "interrupted") run.interrupted = true;
+      continue;
+    }
+    if (entry.type !== "assistant") {
       flush();
       continue;
     }
-    for (const part of parts) {
-      if (part.type === "compaction") {
-        flush();
-        messages.push({ role: "notice", id: String(part.id ?? info.id), content: "Context compacted", level: "info", timestamp: at(info) });
-        continue;
-      }
-      if (!run) {
-        const previous = messages[messages.length - 1];
-        const from = previous?.role === "user" ? previous.timestamp : at(info);
-        run = { id: String(info.id), blocks: [], toolCalls: [], from, timestamp: at(info), outputTokens: 0, interrupted: false };
-      }
+    const content = (entry.content as OcContent[] | undefined) ?? [];
+    if (!run) {
+      const previous = messages[messages.length - 1];
+      const from = previous?.role === "user" ? previous.timestamp : at(entry);
+      run = { id: asString(entry.id), blocks: [], toolCalls: [], from, timestamp: at(entry), outputTokens: 0, interrupted: false };
+    }
+    for (const part of content) {
       switch (part.type) {
-        case undefined:
-          break;
         case "text":
           if (textOf(part)) run.blocks.push({ type: "text", content: textOf(part) });
           break;
@@ -107,11 +112,8 @@ export function readOcHistory(entries: OcHistoryEntry[]): ChatMessage[] {
           break;
       }
     }
-    if (run) {
-      run.outputTokens += ((info.tokens as { output?: number } | undefined)?.output ?? 0);
-      run.completedAt = completedAt(info) ?? run.completedAt;
-      run.interrupted ||= aborted(info);
-    }
+    run.outputTokens += ((entry.tokens as { output?: number } | undefined)?.output ?? 0);
+    run.completedAt = completedAt(entry) ?? run.completedAt;
   }
   flush();
   return messages;
